@@ -126,6 +126,61 @@ class ControllerTests(unittest.TestCase):
         branch = controller.branch_name_for(make_finding())
         self.assertEqual(branch, "osteoblast/hardening/src-service/20260410")
 
+    def test_ensure_clean_worktree_ignores_nested_core_checkout(self) -> None:
+        def run_status(*, args, cwd=None, env=None, input_text=None, check=True):
+            self.assertEqual(args[:3], ["git", "status", "--porcelain"])
+            self.assertIn(":(exclude).osteoblast-core", args)
+            return CommandResult(
+                args=tuple(args),
+                stdout="",
+                stderr="",
+                returncode=0,
+            )
+
+        runner = PrefixRunner(
+            [
+                (
+                    ("git", "status", "--porcelain"),
+                    run_status,
+                )
+            ]
+        )
+        controller = OsteoblastController(
+            repo_root=ROOT,
+            core_root=ROOT / ".osteoblast-core",
+            runner=runner,
+            today=date(2026, 4, 10),
+        )
+        controller.ensure_clean_worktree()
+
+    def test_ensure_clean_worktree_rejects_non_core_changes(self) -> None:
+        def run_status(*, args, cwd=None, env=None, input_text=None, check=True):
+            self.assertEqual(args[:3], ["git", "status", "--porcelain"])
+            self.assertIn(":(exclude).osteoblast-core", args)
+            return CommandResult(
+                args=tuple(args),
+                stdout="?? changed.txt\n",
+                stderr="",
+                returncode=0,
+            )
+
+        runner = PrefixRunner(
+            [
+                (
+                    ("git", "status", "--porcelain"),
+                    run_status,
+                )
+            ]
+        )
+        controller = OsteoblastController(
+            repo_root=ROOT,
+            core_root=ROOT / ".osteoblast-core",
+            runner=runner,
+            today=date(2026, 4, 10),
+        )
+        with self.assertRaises(OsteoblastError):
+            controller.ensure_clean_worktree()
+
     def test_run_scheduled_skips_when_open_pr_exists(self) -> None:
         class SkipController(StubController):
             def has_open_routine_pr(self) -> bool:

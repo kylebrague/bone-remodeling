@@ -470,11 +470,21 @@ class OsteoblastController:
         issues = json.loads(result.stdout or "[]")
         return bool(issues)
 
+    def _nested_core_checkout_pathspec(self) -> str | None:
+        if self.core_root == self.repo_root:
+            return None
+        try:
+            relative = self.core_root.relative_to(self.repo_root)
+        except ValueError:
+            return None
+        return relative.as_posix()
+
     def ensure_clean_worktree(self) -> None:
-        result = self.runner.run(
-            ["git", "status", "--porcelain"],
-            cwd=self.repo_root,
-        )
+        command = ["git", "status", "--porcelain"]
+        nested_core_path = self._nested_core_checkout_pathspec()
+        if nested_core_path:
+            command.extend(["--", ".", f":(exclude){nested_core_path}"])
+        result = self.runner.run(command, cwd=self.repo_root)
         if result.stdout.strip():
             raise OsteoblastError("Repository worktree must be clean before running Osteoblast automation.")
 
