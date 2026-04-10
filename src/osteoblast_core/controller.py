@@ -451,6 +451,9 @@ class OsteoblastController:
         }
 
     def has_open_routine_pr(self) -> bool:
+        return self.find_open_routine_pr() is not None
+
+    def find_open_routine_pr(self, *, title: str | None = None) -> dict[str, Any] | None:
         result = self.runner.run(
             [
                 "gh",
@@ -466,9 +469,17 @@ class OsteoblastController:
             cwd=self.repo_root,
         )
         prs = json.loads(result.stdout or "[]")
-        return bool(prs)
+        if title is None:
+            return prs[0] if prs else None
+        for pr in prs:
+            if isinstance(pr, dict) and pr.get("title") == title:
+                return pr
+        return None
 
     def has_open_serious_issue(self) -> bool:
+        return self.find_open_serious_issue() is not None
+
+    def find_open_serious_issue(self, *, title: str | None = None) -> dict[str, Any] | None:
         result = self.runner.run(
             [
                 "gh",
@@ -486,7 +497,36 @@ class OsteoblastController:
             cwd=self.repo_root,
         )
         issues = json.loads(result.stdout or "[]")
-        return bool(issues)
+        if title is None:
+            return issues[0] if issues else None
+        for issue in issues:
+            if isinstance(issue, dict) and issue.get("title") == title:
+                return issue
+        return None
+
+    def _branch_exists(self, branch_name: str) -> bool:
+        local = self.runner.run(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"],
+            cwd=self.repo_root,
+            check=False,
+        )
+        if local.returncode == 0:
+            return True
+        remote = self.runner.run(
+            ["git", "ls-remote", "--exit-code", "--heads", "origin", branch_name],
+            cwd=self.repo_root,
+            check=False,
+        )
+        return remote.returncode == 0
+
+    def next_available_branch_name_for(self, finding: Finding) -> str:
+        base = self.branch_name_for(finding)
+        candidate = base
+        suffix = 2
+        while self._branch_exists(candidate):
+            candidate = f"{base}-{suffix}"
+            suffix += 1
+        return candidate
 
     def _nested_core_checkout_pathspec(self) -> str | None:
         if self.core_root == self.repo_root:
@@ -659,7 +699,7 @@ class OsteoblastController:
         return value if _looks_like_discovery_payload(value) else None
 
     def create_routine_branch(self, finding: Finding, manifest: Manifest) -> str:
-        branch = self.branch_name_for(finding)
+        branch = self.next_available_branch_name_for(finding)
         self.runner.run(["git", "fetch", "origin", manifest.base_branch], cwd=self.repo_root)
         self.runner.run(
             ["git", "checkout", "-B", branch, f"origin/{manifest.base_branch}"],
@@ -746,6 +786,9 @@ class OsteoblastController:
 
     def pr_title_for(self, finding: Finding) -> str:
         return self.commit_message_for(finding)
+
+    def serious_issue_title_for(self, finding: Finding) -> str:
+        return f"[Osteoblast serious] {finding.commit_title}"
 
     def pr_body_for(self, finding: Finding, verification_commands: tuple[str, ...]) -> str:
         body = [
@@ -865,7 +908,7 @@ class OsteoblastController:
         return result.stdout.strip()
 
     def create_tracking_issue(self, finding: Finding) -> int:
-        title = f"[Osteoblast serious] {finding.commit_title}"
+        title = self.serious_issue_title_for(finding)
         body = "\n".join(
             [
                 "## Serious Osteoblast finding",
@@ -1004,18 +1047,31 @@ class OsteoblastController:
         manifest = self.load_manifest()
         if not manifest.schedule.enabled:
             return {"status": "skipped", "reason": "schedule-disabled"}
-        if self.has_open_routine_pr():
-            return {"status": "skipped", "reason": "open-osteoblast-pr"}
-        if self.has_open_serious_issue():
-            return {"status": "skipped", "reason": "active-serious-escalation"}
 
         finding = self.discover()
         if finding is None:
             return {"status": "no-finding"}
 
         if finding.severity == "serious":
+            issue = self.find_open_serious_issue(title=self.serious_issue_title_for(finding))
+            if issue:
+                return {
+                    "status": "skipped",
+                    "reason": "duplicate-serious-escalation",
+                    "issue": issue,
+                    "finding": self._finding_payload(finding),
+                }
             escalation = self.escalate_serious_finding(finding, manifest)
             return {"status": "serious", "finding": self._finding_payload(finding), **escalation}
+
+        pr = self.find_open_routine_pr(title=self.pr_title_for(finding))
+        if pr:
+            return {
+                "status": "skipped",
+                "reason": "duplicate-osteoblast-pr",
+                "pr": pr,
+                "finding": self._finding_payload(finding),
+            }
 
         branch_name = self.create_routine_branch(finding, manifest)
         worker_report = self.execute(finding)

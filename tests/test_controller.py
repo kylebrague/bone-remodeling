@@ -181,12 +181,67 @@ class ControllerTests(unittest.TestCase):
         with self.assertRaises(OsteoblastError):
             controller.ensure_clean_worktree()
 
-    def test_run_scheduled_skips_when_open_pr_exists(self) -> None:
-        class SkipController(StubController):
-            def has_open_routine_pr(self) -> bool:
-                return True
+    def test_run_scheduled_allows_existing_open_pr_for_other_finding(self) -> None:
+        class RepeatableController(StubController):
+            def discover(self, *, scope=None):
+                return make_finding()
 
-        controller = SkipController(
+            def find_open_routine_pr(self, *, title: str | None = None):
+                if title == self.pr_title_for(make_finding()):
+                    return None
+                return {"number": 41, "title": "chore(osteoblast): unrelated cleanup", "url": "https://example/pr/41"}
+
+            def create_routine_branch(self, finding: Finding, manifest: Manifest) -> str:
+                return "osteoblast/hardening/src-service/20260410-2"
+
+            def execute(self, finding: Finding) -> str:
+                return '{"status":"ok"}'
+
+            def verify(self, manifest: Manifest) -> tuple[str, ...]:
+                return ("python -m unittest",)
+
+            def validate_routine_diff(self, finding: Finding, manifest: Manifest) -> DiffStats:
+                return DiffStats(files=("src/service.py",), file_count=1, changed_lines=12)
+
+            def open_pr(
+                self,
+                *,
+                finding: Finding,
+                manifest: Manifest,
+                branch_name: str,
+                verification_commands: tuple[str, ...],
+            ) -> str:
+                if branch_name != "osteoblast/hardening/src-service/20260410-2":
+                    raise AssertionError(f"unexpected branch name: {branch_name}")
+                return "https://github.com/acme/repo/pull/42"
+
+        controller = RepeatableController(
+            manifest=make_manifest(),
+            repo_root=ROOT,
+            core_root=ROOT,
+            today=date(2026, 4, 10),
+        )
+        result = controller.run_scheduled()
+        self.assertEqual(result["status"], "routine")
+        self.assertEqual(result["pr_url"], "https://github.com/acme/repo/pull/42")
+
+    def test_run_scheduled_skips_duplicate_open_pr_for_same_finding(self) -> None:
+        finding = make_finding()
+
+        class DuplicateController(StubController):
+            def discover(self, *, scope=None):
+                return finding
+
+            def find_open_routine_pr(self, *, title: str | None = None):
+                if title == self.pr_title_for(finding):
+                    return {
+                        "number": 7,
+                        "title": title,
+                        "url": "https://github.com/acme/repo/pull/7",
+                    }
+                return None
+
+        controller = DuplicateController(
             manifest=make_manifest(),
             repo_root=ROOT,
             core_root=ROOT,
@@ -194,7 +249,52 @@ class ControllerTests(unittest.TestCase):
         )
         self.assertEqual(
             controller.run_scheduled(),
-            {"status": "skipped", "reason": "open-osteoblast-pr"},
+            {
+                "status": "skipped",
+                "reason": "duplicate-osteoblast-pr",
+                "pr": {
+                    "number": 7,
+                    "title": controller.pr_title_for(finding),
+                    "url": "https://github.com/acme/repo/pull/7",
+                },
+                "finding": controller._finding_payload(finding),
+            },
+        )
+
+    def test_run_scheduled_skips_duplicate_serious_issue_for_same_finding(self) -> None:
+        finding = make_finding(severity="serious")
+
+        class DuplicateSeriousController(StubController):
+            def discover(self, *, scope=None):
+                return finding
+
+            def find_open_serious_issue(self, *, title: str | None = None):
+                if title == self.serious_issue_title_for(finding):
+                    return {
+                        "number": 9,
+                        "title": title,
+                        "url": "https://github.com/acme/repo/issues/9",
+                    }
+                return None
+
+        controller = DuplicateSeriousController(
+            manifest=make_manifest(),
+            repo_root=ROOT,
+            core_root=ROOT,
+            today=date(2026, 4, 10),
+        )
+        self.assertEqual(
+            controller.run_scheduled(),
+            {
+                "status": "skipped",
+                "reason": "duplicate-serious-escalation",
+                "issue": {
+                    "number": 9,
+                    "title": controller.serious_issue_title_for(finding),
+                    "url": "https://github.com/acme/repo/issues/9",
+                },
+                "finding": controller._finding_payload(finding),
+            },
         )
 
     def test_validate_routine_diff_rejects_forbidden_path(self) -> None:
@@ -211,6 +311,58 @@ class ControllerTests(unittest.TestCase):
         )
         with self.assertRaises(OsteoblastError):
             controller.validate_routine_diff(make_finding(), make_manifest())
+
+    def test_create_routine_branch_uses_suffix_when_branch_name_exists(self) -> None:
+        def run_show_ref(*, args, cwd=None, env=None, input_text=None, check=True):
+            ref = args[-1]
+            return CommandResult(
+                args=tuple(args),
+                stdout="",
+                stderr="",
+                returncode=1 if ref.startswith("refs/heads/osteoblast/") else 0,
+            )
+
+        def run_ls_remote(*, args, cwd=None, env=None, input_text=None, check=True):
+            branch = args[-1]
+            return CommandResult(
+                args=tuple(args),
+                stdout="taken\n" if branch == "osteoblast/hardening/src-service/20260410" else "",
+                stderr="",
+                returncode=0 if branch == "osteoblast/hardening/src-service/20260410" else 2,
+            )
+
+        checkout_calls: list[tuple[str, ...]] = []
+
+        def run_checkout(*, args, cwd=None, env=None, input_text=None, check=True):
+            checkout_calls.append(tuple(args))
+            return CommandResult(args=tuple(args), stdout="", stderr="", returncode=0)
+
+        runner = PrefixRunner(
+            [
+                (("git", "show-ref", "--verify", "--quiet"), run_show_ref),
+                (("git", "ls-remote", "--exit-code", "--heads", "origin"), run_ls_remote),
+                (("git", "fetch", "origin", "main"), CommandResult(args=("git", "fetch", "origin", "main"), stdout="", stderr="", returncode=0)),
+                (("git", "checkout", "-B"), run_checkout),
+            ]
+        )
+        controller = OsteoblastController(
+            repo_root=ROOT,
+            core_root=ROOT,
+            runner=runner,
+            today=date(2026, 4, 10),
+        )
+        branch = controller.create_routine_branch(make_finding(), make_manifest())
+        self.assertEqual(branch, "osteoblast/hardening/src-service/20260410-2")
+        self.assertEqual(
+            checkout_calls[0],
+            (
+                "git",
+                "checkout",
+                "-B",
+                "osteoblast/hardening/src-service/20260410-2",
+                "origin/main",
+            ),
+        )
 
     def test_pick_scope_error_mentions_configured_and_existing_paths(self) -> None:
         manifest = Manifest.from_mapping(
