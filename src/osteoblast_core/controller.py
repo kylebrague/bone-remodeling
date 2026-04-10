@@ -76,6 +76,14 @@ def _is_session_persistence_failure(stderr: str) -> bool:
     return all(line.startswith("Failed to persist session events:") for line in lines)
 
 
+def _is_copilot_assignment_unavailable(stderr: str) -> bool:
+    lowered = stderr.casefold()
+    return (
+        "copilot agent is not enabled in this repository" in lowered
+        or "replaceactorsforassignable" in lowered
+    )
+
+
 class OsteoblastController:
     def __init__(
         self,
@@ -968,12 +976,28 @@ class OsteoblastController:
                     "GitHub Copilot cloud agent task started, but no task metadata was available immediately.",
                 )
         except CommandError:
-            self.fallback_assign_copilot(issue_number)
-            summary["mode"] = "copilot-assignee"
-            self.comment_on_issue(
-                issue_number,
-                "Fell back to assigning @copilot because `gh agent-task create` was unavailable or failed.",
-            )
+            try:
+                self.fallback_assign_copilot(issue_number)
+            except CommandError as exc:
+                if _is_copilot_assignment_unavailable(exc.stderr):
+                    self.comment_on_issue(
+                        issue_number,
+                        "GitHub Copilot cloud agent was unavailable, and assigning @copilot also failed because Copilot agent is not enabled for this repository. Please triage this issue manually or enable Copilot agent access for the repository.",
+                    )
+                else:
+                    details = exc.stderr.strip() or exc.stdout.strip() or str(exc)
+                    self.comment_on_issue(
+                        issue_number,
+                        "GitHub Copilot cloud agent was unavailable, and assigning @copilot also failed. Please triage this issue manually.\n\n"
+                        "Failure details:\n"
+                        f"```\n{self._preview_output(details, limit=1000)}\n```",
+                    )
+            else:
+                summary["mode"] = "copilot-assignee"
+                self.comment_on_issue(
+                    issue_number,
+                    "Fell back to assigning @copilot because `gh agent-task create` was unavailable or failed.",
+                )
         return summary
 
     def run_scheduled(self) -> dict[str, Any]:

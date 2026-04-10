@@ -818,6 +818,54 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(result["mode"], "copilot-assignee")
         self.assertTrue(any(call[:3] == ("gh", "issue", "edit") for call in runner.calls))
 
+    def test_escalate_serious_finding_degrades_when_copilot_assignment_not_enabled(self) -> None:
+        issue_create = CommandResult(
+            args=("gh", "issue", "create"),
+            stdout="https://github.com/acme/repo/issues/42\n",
+            stderr="",
+            returncode=0,
+        )
+        issue_comment = CommandResult(args=("gh", "issue", "comment"), stdout="", stderr="", returncode=0)
+
+        def run_label_list(*, args, cwd=None, env=None, input_text=None, check=True):
+            label = args[args.index("--search") + 1]
+            return CommandResult(
+                args=tuple(args),
+                stdout=json.dumps([{"name": label}]),
+                stderr="",
+                returncode=0,
+            )
+
+        runner = PrefixRunner(
+            [
+                (("gh", "label", "list"), run_label_list),
+                (("gh", "issue", "create"), issue_create),
+                (
+                    ("gh", "agent-task", "create"),
+                    CommandError(["gh", "agent-task", "create"], 1, "", "boom"),
+                ),
+                (
+                    ("gh", "issue", "edit"),
+                    CommandError(
+                        ["gh", "issue", "edit", "42", "--add-assignee", "@copilot"],
+                        1,
+                        "",
+                        "GraphQL: Copilot agent is not enabled in this repository. (replaceActorsForAssignable)",
+                    ),
+                ),
+                (("gh", "issue", "comment"), issue_comment),
+            ]
+        )
+        controller = OsteoblastController(
+            repo_root=ROOT,
+            core_root=ROOT,
+            runner=runner,
+            today=date(2026, 4, 10),
+        )
+        result = controller.escalate_serious_finding(make_finding(severity="serious"), make_manifest())
+        self.assertEqual(result["mode"], "issue-only")
+        self.assertTrue(any(call[:3] == ("gh", "issue", "comment") for call in runner.calls))
+
     def test_escalate_serious_finding_uses_agent_task_when_available(self) -> None:
         issue_create = CommandResult(
             args=("gh", "issue", "create"),
