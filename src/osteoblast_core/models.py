@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Iterable
+import re
 import tomllib
 
 
@@ -51,6 +52,30 @@ DEFAULT_FORBIDDEN_LOCAL_GLOBS = (
     "**/schema/**",
     "**/*.sql",
 )
+
+DEFAULT_CATEGORY_ALIASES = {
+    "bug": "bugs",
+    "bugs": "bugs",
+    "correctness": "bugs",
+    "dead-code": "dead-code",
+    "dead-code-removal": "dead-code",
+    "deadcode": "dead-code",
+    "dead-tissue": "dead-code",
+    "doc": "docs",
+    "docs": "docs",
+    "documentation": "docs",
+    "stale-docs": "docs",
+    "hardening": "hardening",
+    "consistency": "consistency",
+    "readability": "readability",
+    "performance": "performance",
+}
+
+
+def canonicalize_category(value: str) -> str:
+    normalized = re.sub(r"[\s_]+", "-", value.strip().lower())
+    normalized = re.sub(r"-{2,}", "-", normalized).strip("-")
+    return DEFAULT_CATEGORY_ALIASES.get(normalized, normalized)
 
 
 def _as_list_of_strings(value: Any, field_name: str) -> tuple[str, ...]:
@@ -209,7 +234,7 @@ class Manifest:
             base_branch=_require_string(mapping, "base_branch"),
             include_paths=include_paths,
             exclude_paths=exclude_paths_list,
-            allowed_categories=allowed_categories,
+            allowed_categories=tuple(canonicalize_category(category) for category in allowed_categories),
             severity_rules=SeverityRules.from_mapping(mapping.get("severity_rules")),
             max_files_changed=_require_int(mapping, "max_files_changed"),
             max_changed_lines=_require_int(mapping, "max_changed_lines"),
@@ -278,7 +303,7 @@ class Finding:
 
         return cls(
             type=_require_string(mapping, "type"),
-            category=_require_string(mapping, "category"),
+            category=canonicalize_category(_require_string(mapping, "category")),
             scope=_require_string(mapping, "scope"),
             proof=proof_items,
             candidate_files=candidate_files,

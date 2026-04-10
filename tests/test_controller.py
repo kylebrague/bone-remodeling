@@ -188,6 +188,217 @@ class ControllerTests(unittest.TestCase):
             self.assertIn("Configured include_paths: src, app, lib, docs", message)
             self.assertIn("documentation, packages", message)
 
+    def test_parse_discovery_output_accepts_plain_json(self) -> None:
+        controller = OsteoblastController(
+            repo_root=ROOT,
+            core_root=ROOT,
+            today=date(2026, 4, 10),
+        )
+        payload = controller._parse_discovery_output(
+            json.dumps(
+                {
+                    "type": "osteoblast",
+                    "category": "hardening",
+                    "scope": "packages/api",
+                    "proof": ["Input is unvalidated."],
+                    "candidate_files": ["packages/api/handler.ts"],
+                    "why": "This should validate at the boundary.",
+                    "estimated_change_size": {"files": 1, "lines": 12},
+                    "confidence": 0.9,
+                    "commit_title": "validate handler input",
+                    "verification_hint": "npm test -- handler",
+                }
+            )
+        )
+        self.assertEqual(payload["scope"], "packages/api")
+
+    def test_parse_discovery_output_accepts_fenced_json(self) -> None:
+        controller = OsteoblastController(
+            repo_root=ROOT,
+            core_root=ROOT,
+            today=date(2026, 4, 10),
+        )
+        payload = controller._parse_discovery_output(
+            "Here is the finding:\n\n```json\n"
+            + json.dumps(
+                {
+                    "type": "osteoblast",
+                    "category": "docs",
+                    "scope": "documentation",
+                    "proof": ["README is stale."],
+                    "candidate_files": ["documentation/README.md"],
+                    "why": "Docs should match the code.",
+                    "estimated_change_size": {"files": 1, "lines": 8},
+                    "confidence": 0.95,
+                    "commit_title": "fix stale readme",
+                    "verification_hint": "N/A",
+                }
+            )
+            + "\n```\n"
+        )
+        self.assertEqual(payload["category"], "docs")
+
+    def test_parse_discovery_output_accepts_json_with_trailing_text(self) -> None:
+        controller = OsteoblastController(
+            repo_root=ROOT,
+            core_root=ROOT,
+            today=date(2026, 4, 10),
+        )
+        payload = controller._parse_discovery_output(
+            json.dumps(
+                {
+                    "type": "osteoblast",
+                    "category": "bugs",
+                    "scope": "packages/functions",
+                    "proof": ["A null check is missing."],
+                    "candidate_files": ["packages/functions/index.ts"],
+                    "why": "This can throw at runtime.",
+                    "estimated_change_size": {"files": 1, "lines": 6},
+                    "confidence": 0.88,
+                    "commit_title": "add missing null check",
+                    "verification_hint": "npm test -- functions",
+                }
+            )
+            + "\n\nNotes: I stayed inside the requested scope."
+        )
+        self.assertEqual(payload["category"], "bugs")
+
+    def test_discover_normalizes_category_alias_and_injects_allowed_categories(self) -> None:
+        manifest = Manifest.from_mapping(
+            {
+                "version": "1",
+                "base_branch": "main",
+                "include_paths": ["src"],
+                "exclude_paths": [],
+                "allowed_categories": ["bugs", "dead-code", "docs"],
+                "severity_rules": {"confidence_threshold": 0.75},
+                "max_files_changed": 5,
+                "max_changed_lines": 150,
+                "verify": {"commands": ["python -m unittest"]},
+                "pr": {"labels": ["osteoblast"], "reviewers": []},
+                "schedule": {"enabled": True},
+            }
+        )
+
+        def run_copilot(*, args, cwd=None, env=None, input_text=None, check=True):
+            prompt = args[args.index("-p") + 1]
+            self.assertIn("`dead-code`", prompt)
+            self.assertIn("use `dead-code` instead of `dead tissue`", prompt.lower())
+            return CommandResult(
+                args=tuple(args),
+                stdout=json.dumps(
+                    {
+                        "type": "osteoclast",
+                        "category": "dead tissue",
+                        "scope": "src",
+                        "proof": ["Unused fallback branch is unreachable."],
+                        "candidate_files": ["src/legacy.py"],
+                        "why": "This code is dead and increases maintenance burden.",
+                        "estimated_change_size": {"files": 1, "lines": 9},
+                        "confidence": 0.9,
+                        "commit_title": "remove unused fallback branch",
+                        "verification_hint": "python -m unittest",
+                    }
+                ),
+                stderr="",
+                returncode=0,
+            )
+
+        runner = PrefixRunner(
+            [
+                (("git", "status", "--porcelain"), CommandResult(args=("git", "status", "--porcelain"), stdout="", stderr="", returncode=0)),
+                (("copilot",), run_copilot),
+            ]
+        )
+        controller = StubController(
+            manifest=manifest,
+            repo_root=ROOT,
+            core_root=ROOT,
+            runner=runner,
+            today=date(2026, 4, 10),
+        )
+        finding = controller.discover(scope=ROOT / "src")
+        self.assertIsNotNone(finding)
+        assert finding is not None
+        self.assertEqual(finding.category, "dead-code")
+
+    def test_prepare_copilot_environment_creates_session_state_root(self) -> None:
+        controller = OsteoblastController(
+            repo_root=ROOT,
+            core_root=ROOT,
+            today=date(2026, 4, 10),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            copilot_home = Path(temp_dir) / "copilot-home"
+            env = controller._prepare_copilot_environment(
+                {"COPILOT_HOME": str(copilot_home), "OSTEOBLAST_SHOW_BANNER": "0"}
+            )
+            self.assertEqual(env["COPILOT_HOME"], str(copilot_home.resolve()))
+            self.assertTrue((copilot_home / "session-state").exists())
+
+    def test_run_copilot_wraps_command_error_with_context(self) -> None:
+        runner = PrefixRunner(
+            [
+                (
+                    ("copilot",),
+                    CommandError(
+                        ["copilot", "--agent", "osteoblast"],
+                        1,
+                        '{"status":"broken"}',
+                        "stderr boom",
+                    ),
+                )
+            ]
+        )
+        controller = OsteoblastController(
+            repo_root=ROOT,
+            core_root=ROOT,
+            runner=runner,
+            today=date(2026, 4, 10),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaises(OsteoblastError) as context:
+                controller._run_copilot(
+                    agent="osteoblast",
+                    prompt="test prompt",
+                    extra_env={"COPILOT_HOME": str(Path(temp_dir) / "copilot-home")},
+                )
+        message = str(context.exception)
+        self.assertIn("Copilot command failed for agent `osteoblast`", message)
+        self.assertIn("stderr boom", message)
+        self.assertIn('{"status":"broken"}', message)
+        self.assertIn("COPILOT_HOME:", message)
+
+    def test_run_copilot_recovers_from_session_persistence_failure(self) -> None:
+        stderr = "\n".join(
+            [
+                "Failed to persist session events: Error: ENOENT",
+                "Failed to persist session events: Error: ENOENT",
+            ]
+        )
+        runner = PrefixRunner(
+            [
+                (
+                    ("copilot",),
+                    CommandError(
+                        ["copilot", "--agent", "osteoblast"],
+                        1,
+                        '{"status":"no-finding"}',
+                        stderr,
+                    ),
+                )
+            ]
+        )
+        controller = OsteoblastController(
+            repo_root=ROOT,
+            core_root=ROOT,
+            runner=runner,
+            today=date(2026, 4, 10),
+        )
+        result = controller._run_copilot(agent="osteoblast", prompt="test prompt")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, '{"status":"no-finding"}')
+
     def test_doctor_reports_missing_manifest_and_suggested_scopes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = Path(temp_dir)

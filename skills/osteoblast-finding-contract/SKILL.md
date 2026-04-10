@@ -32,6 +32,8 @@ Return exactly one JSON object with these keys:
 ## Rules
 
 - Emit exactly one finding.
+- `category` must be a canonical machine-safe slug such as `bugs`, `dead-code`, `hardening`, `consistency`, `readability`, `performance`, or `docs`.
+- Do not invent prose or metaphor categories. Use `dead-code`, not `dead tissue`.
 - `proof` must cite concrete evidence from the repository.
 - `candidate_files` must be the smallest credible set.
 - `commit_title` must be short and branch-safe.

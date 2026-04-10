@@ -55,8 +55,10 @@ When the prompt asks you to discover a finding:
 }
 ```
 
-5. Do not add markdown explanation unless the prompt explicitly asks for it.
-6. If no acceptable finding exists, return:
+5. `category` must be a canonical slug, not a freeform phrase. Use values like `bugs`, `dead-code`, `hardening`, `consistency`, `readability`, `performance`, or `docs`.
+6. Do not invent metaphoric labels. For example, use `dead-code` instead of `dead tissue`.
+7. Do not add markdown explanation unless the prompt explicitly asks for it.
+8. If no acceptable finding exists, return:
 
 ```json
 {

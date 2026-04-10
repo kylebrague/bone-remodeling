@@ -25,6 +25,9 @@ Use the `osteoblast-manifest-setup` skill when creating or repairing `.github/os
 
 When the prompt asks you to discover a finding, return exactly one JSON finding payload or the documented no-finding object.
 
+- `category` must be a canonical slug such as `bugs`, `dead-code`, `hardening`, `consistency`, `readability`, `performance`, or `docs`.
+- Do not invent prose or metaphoric labels. Use `dead-code`, not `dead tissue`.
+
 ## Remediation Mode
 
 When the prompt supplies a concrete finding or issue description to fix:

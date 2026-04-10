@@ -14,6 +14,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from osteoblast_core.controller import OsteoblastController  # noqa: E402
+from osteoblast_core.models import OsteoblastError  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -75,62 +76,69 @@ def main() -> int:
     repo_root = Path(args.repo_root).resolve()
     core_root = Path(args.core_root).resolve()
     controller = OsteoblastController(repo_root=repo_root, core_root=core_root)
+    try:
+        if args.command == "bootstrap":
+            created = controller.bootstrap(
+                target_root=Path(args.target_root).resolve(),
+                core_repository=args.core_repository,
+                core_ref=args.core_ref,
+                gh_token_secret=args.gh_token_secret,
+                copilot_token_secret=args.copilot_token_secret,
+                force=args.force,
+            )
+            print(json.dumps({"status": "ok", "files": [str(path) for path in created]}, indent=2))
+            return 0
 
-    if args.command == "bootstrap":
-        created = controller.bootstrap(
-            target_root=Path(args.target_root).resolve(),
-            core_repository=args.core_repository,
-            core_ref=args.core_ref,
-            gh_token_secret=args.gh_token_secret,
-            copilot_token_secret=args.copilot_token_secret,
-            force=args.force,
-        )
-        print(json.dumps({"status": "ok", "files": [str(path) for path in created]}, indent=2))
-        return 0
+        if args.command == "discover":
+            scope = (repo_root / args.scope).resolve() if args.scope else None
+            finding = controller.discover(scope=scope)
+            print(
+                json.dumps(controller._finding_payload(finding), indent=2)
+                if finding
+                else json.dumps({"status": "no-finding"})
+            )
+            return 0
 
-    if args.command == "discover":
-        scope = (repo_root / args.scope).resolve() if args.scope else None
-        finding = controller.discover(scope=scope)
-        print(json.dumps(controller._finding_payload(finding), indent=2) if finding else json.dumps({"status": "no-finding"}))
-        return 0
+        if args.command == "doctor":
+            result = controller.doctor(fix=args.fix)
+            print(json.dumps(result, indent=2))
+            return 0 if result["status"] != "error" else 1
 
-    if args.command == "doctor":
-        result = controller.doctor(fix=args.fix)
-        print(json.dumps(result, indent=2))
-        return 0 if result["status"] != "error" else 1
+        if args.command == "execute":
+            from osteoblast_core.models import Finding  # noqa: E402
 
-    if args.command == "execute":
-        from osteoblast_core.models import Finding  # noqa: E402
+            payload = json.loads(Path(args.finding_file).read_text(encoding="utf-8"))
+            report = controller.execute(Finding.from_dict(payload))
+            print(report)
+            return 0
 
-        payload = json.loads(Path(args.finding_file).read_text(encoding="utf-8"))
-        report = controller.execute(Finding.from_dict(payload))
-        print(report)
-        return 0
+        if args.command == "verify":
+            manifest = controller.load_manifest()
+            commands = controller.verify(manifest)
+            print(json.dumps({"status": "ok", "commands": list(commands)}, indent=2))
+            return 0
 
-    if args.command == "verify":
-        manifest = controller.load_manifest()
-        commands = controller.verify(manifest)
-        print(json.dumps({"status": "ok", "commands": list(commands)}, indent=2))
-        return 0
+        if args.command == "open-pr":
+            from osteoblast_core.models import Finding  # noqa: E402
 
-    if args.command == "open-pr":
-        from osteoblast_core.models import Finding  # noqa: E402
+            payload = json.loads(Path(args.finding_file).read_text(encoding="utf-8"))
+            finding = Finding.from_dict(payload)
+            manifest = controller.load_manifest()
+            pr_url = controller.open_pr(
+                finding=finding,
+                manifest=manifest,
+                branch_name=args.branch_name,
+                verification_commands=tuple(args.verification_command),
+            )
+            print(json.dumps({"status": "ok", "pr_url": pr_url}, indent=2))
+            return 0
 
-        payload = json.loads(Path(args.finding_file).read_text(encoding="utf-8"))
-        finding = Finding.from_dict(payload)
-        manifest = controller.load_manifest()
-        pr_url = controller.open_pr(
-            finding=finding,
-            manifest=manifest,
-            branch_name=args.branch_name,
-            verification_commands=tuple(args.verification_command),
-        )
-        print(json.dumps({"status": "ok", "pr_url": pr_url}, indent=2))
-        return 0
-
-    if args.command == "run-scheduled":
-        print(json.dumps(controller.run_scheduled(), indent=2))
-        return 0
+        if args.command == "run-scheduled":
+            print(json.dumps(controller.run_scheduled(), indent=2))
+            return 0
+    except OsteoblastError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
     parser.error(f"Unknown command: {args.command}")
     return 2

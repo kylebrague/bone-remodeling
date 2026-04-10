@@ -8,9 +8,10 @@ import json
 import os
 import re
 import shutil
-from typing import Any
+import tempfile
+from typing import Any, Mapping
 
-from .commands import CommandError, CommandRunner
+from .commands import CommandError, CommandRunner, CommandResult
 from .models import Finding, Manifest, ManifestError, OsteoblastError
 from .templates import copy_paths, render_tree
 
@@ -37,6 +38,32 @@ def _extract_issue_number(url: str) -> int:
     if not match:
         raise OsteoblastError(f"Could not extract issue number from URL: {url}")
     return int(match.group(1))
+
+
+def _looks_like_discovery_payload(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if value.get("status") == "no-finding":
+        return True
+    required = {
+        "type",
+        "category",
+        "scope",
+        "proof",
+        "candidate_files",
+        "why",
+        "estimated_change_size",
+        "commit_title",
+        "verification_hint",
+    }
+    return required.issubset(value.keys())
+
+
+def _is_session_persistence_failure(stderr: str) -> bool:
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if not lines:
+        return False
+    return all(line.startswith("Failed to persist session events:") for line in lines)
 
 
 class OsteoblastController:
@@ -451,48 +478,157 @@ class OsteoblastController:
         if result.stdout.strip():
             raise OsteoblastError("Repository worktree must be clean before running Osteoblast automation.")
 
+    def _prepare_copilot_environment(
+        self,
+        extra_env: Mapping[str, str] | None = None,
+    ) -> dict[str, str]:
+        env = dict(os.environ)
+        if extra_env:
+            env.update(extra_env)
+
+        configured_home = env.get("COPILOT_HOME")
+        copilot_home = (
+            Path(configured_home).expanduser().resolve()
+            if configured_home
+            else (Path.home() / ".copilot").resolve()
+        )
+        session_state_root = copilot_home / "session-state"
+        try:
+            session_state_root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            fallback_home = (
+                Path(tempfile.gettempdir())
+                / f"osteoblast-copilot-{hashlib.sha256(str(self.repo_root).encode('utf-8')).hexdigest()[:12]}"
+            )
+            (fallback_home / "session-state").mkdir(parents=True, exist_ok=True)
+            env["COPILOT_HOME"] = str(fallback_home)
+        else:
+            env["COPILOT_HOME"] = str(copilot_home)
+        return env
+
+    @staticmethod
+    def _preview_output(text: str, *, limit: int = 2000) -> str:
+        stripped = text.strip()
+        if len(stripped) <= limit:
+            return stripped
+        return stripped[:limit] + "\n...[truncated]"
+
+    def _run_copilot(
+        self,
+        *,
+        agent: str,
+        prompt: str,
+        extra_env: Mapping[str, str] | None = None,
+    ):
+        env = self._prepare_copilot_environment(extra_env)
+        try:
+            return self.runner.run(
+                [
+                    "copilot",
+                    "--plugin-dir",
+                    str(self.core_root),
+                    "--agent",
+                    agent,
+                    "-p",
+                    prompt,
+                    "--allow-all-tools",
+                    "--no-ask-user",
+                    "-s",
+                ],
+                cwd=self.repo_root,
+                env=env,
+            )
+        except CommandError as exc:
+            if exc.stdout.strip() and _is_session_persistence_failure(exc.stderr):
+                return CommandResult(
+                    args=exc.command,
+                    stdout=exc.stdout,
+                    stderr=exc.stderr,
+                    returncode=0,
+                )
+            details: list[str] = [f"COPILOT_HOME: {env['COPILOT_HOME']}"]
+            if exc.stderr.strip():
+                details.append("stderr:\n" + self._preview_output(exc.stderr))
+            if exc.stdout.strip():
+                details.append("stdout:\n" + self._preview_output(exc.stdout))
+            raise OsteoblastError(
+                f"Copilot command failed for agent `{agent}` with exit code {exc.returncode}.\n\n"
+                + "\n\n".join(details)
+            ) from exc
+
     def discover(self, *, scope: Path | None = None) -> Finding | None:
         manifest = self.load_manifest()
         chosen_scope = scope or self.pick_scope(manifest)
         relative_scope = chosen_scope.relative_to(self.repo_root).as_posix()
         self.ensure_clean_worktree()
+        allowed_categories = ", ".join(f"`{category}`" for category in manifest.allowed_categories)
         prompt = (
             "Discovery mode only. Analyze the repository scope "
             f"`{relative_scope}` and respond with JSON only. "
             "Use the osteoblast-finding-contract skill. "
+            f"Set `category` to exactly one of: {allowed_categories}. "
+            "Use canonical machine-safe slugs only, not prose or metaphors. "
+            "For example, use `dead-code` instead of `dead tissue`. "
             "Do not edit repository files or run mutating commands. "
             "Return exactly one finding object, or the documented no-finding object if nothing acceptable exists."
         )
-        env = os.environ | {
+        env = {
             "OSTEOBLAST_READ_ONLY": "1",
             "OSTEOBLAST_SHOW_BANNER": "0",
         }
-        result = self.runner.run(
-            [
-                "copilot",
-                "--plugin-dir",
-                str(self.core_root),
-                "--agent",
-                "osteoblast",
-                "-p",
-                prompt,
-                "--allow-all-tools",
-                "--no-ask-user",
-                "-s",
-            ],
-            cwd=self.repo_root,
-            env=env,
-        )
+        result = self._run_copilot(agent="osteoblast", prompt=prompt, extra_env=env)
         self.ensure_clean_worktree()
-        payload = json.loads(result.stdout)
+        payload = self._parse_discovery_output(result.stdout)
         if payload.get("status") == "no-finding":
             return None
         finding = Finding.from_dict(payload)
         if finding.category not in manifest.allowed_categories:
             raise OsteoblastError(
-                f"Discovered category `{finding.category}` is not allowed by the manifest."
+                "Discovered category "
+                f"`{finding.category}` is not allowed by the manifest. "
+                f"Allowed categories: {', '.join(manifest.allowed_categories)}."
             )
         return finding.classify(manifest)
+
+    def _parse_discovery_output(self, stdout: str) -> dict[str, Any]:
+        text = stdout.strip()
+        if not text:
+            raise OsteoblastError("Copilot returned empty output for discovery.")
+
+        direct = self._try_parse_json_document(text)
+        if direct is not None:
+            return direct
+
+        fenced_match = re.search(r"```json\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+        if fenced_match:
+            fenced = self._try_parse_json_document(fenced_match.group(1).strip())
+            if fenced is not None:
+                return fenced
+
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(text):
+            if char not in "{[":
+                continue
+            try:
+                candidate, _ = decoder.raw_decode(text[index:])
+            except json.JSONDecodeError:
+                continue
+            if _looks_like_discovery_payload(candidate):
+                return candidate
+
+        preview = text[:500]
+        raise OsteoblastError(
+            "Could not parse a valid discovery JSON payload from Copilot output. "
+            f"Output preview: {preview}"
+        )
+
+    @staticmethod
+    def _try_parse_json_document(text: str) -> dict[str, Any] | None:
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return value if _looks_like_discovery_payload(value) else None
 
     def create_routine_branch(self, finding: Finding, manifest: Manifest) -> str:
         branch = self.branch_name_for(finding)
@@ -511,25 +647,14 @@ class OsteoblastController:
             f"{json.dumps(self._finding_payload(finding), indent=2)}\n\n"
             "Stay inside the approved scope and report using the worker response contract."
         )
-        env = os.environ | {
+        env = {
             "OSTEOBLAST_SHOW_BANNER": "0",
             "OSTEOBLAST_FINDING_SEVERITY": finding.severity or "routine",
         }
-        result = self.runner.run(
-            [
-                "copilot",
-                "--plugin-dir",
-                str(self.core_root),
-                "--agent",
-                "osteoblast-worker",
-                "-p",
-                prompt,
-                "--allow-all-tools",
-                "--no-ask-user",
-                "-s",
-            ],
-            cwd=self.repo_root,
-            env=env,
+        result = self._run_copilot(
+            agent="osteoblast-worker",
+            prompt=prompt,
+            extra_env=env,
         )
         return result.stdout.strip()
 

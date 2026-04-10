@@ -10,7 +10,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from osteoblast_core.models import Finding, Manifest
+from osteoblast_core.models import Finding, Manifest, canonicalize_category
 
 
 def make_manifest() -> Manifest:
@@ -79,3 +79,23 @@ class ManifestModelTests(unittest.TestCase):
         )
         classified = finding.classify(make_manifest())
         self.assertEqual(classified.severity, "routine")
+
+    def test_canonicalize_category_maps_dead_tissue_to_dead_code(self) -> None:
+        self.assertEqual(canonicalize_category("dead tissue"), "dead-code")
+
+    def test_finding_normalizes_category_aliases(self) -> None:
+        finding = Finding.from_dict(
+            {
+                "type": "osteoclast",
+                "category": "dead tissue",
+                "scope": "src",
+                "proof": ["Unused code path remains reachable only by tests."],
+                "candidate_files": ["src/legacy.py"],
+                "why": "The dead code adds maintenance cost.",
+                "estimated_change_size": {"files": 1, "lines": 10},
+                "confidence": 0.92,
+                "commit_title": "remove unused legacy branch",
+                "verification_hint": "pytest tests/test_legacy.py",
+            }
+        )
+        self.assertEqual(finding.category, "dead-code")
