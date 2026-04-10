@@ -743,6 +743,13 @@ class OsteoblastController:
         body.extend(f"- `{command}`" for command in verification_commands)
         return "\n".join(body)
 
+    def _run_gh_with_body(self, args: list[str], body: str) -> CommandResult:
+        return self.runner.run(
+            [*args, "--body-file", "-"],
+            cwd=self.repo_root,
+            input_text=body,
+        )
+
     def open_pr(
         self,
         *,
@@ -770,14 +777,15 @@ class OsteoblastController:
             branch_name,
             "--title",
             self.pr_title_for(finding),
-            "--body",
-            self.pr_body_for(finding, verification_commands),
         ]
         for label in manifest.pr.labels:
             command.extend(["--label", label])
         for reviewer in manifest.pr.reviewers:
             command.extend(["--reviewer", reviewer])
-        result = self.runner.run(command, cwd=self.repo_root)
+        result = self._run_gh_with_body(
+            command,
+            self.pr_body_for(finding, verification_commands),
+        )
         return result.stdout.strip()
 
     def create_tracking_issue(self, finding: Finding) -> int:
@@ -799,21 +807,19 @@ class OsteoblastController:
                 "```",
             ]
         )
-        result = self.runner.run(
+        result = self._run_gh_with_body(
             [
                 "gh",
                 "issue",
                 "create",
                 "--title",
                 title,
-                "--body",
-                body,
                 "--label",
                 SERIOUS_LABELS[0],
                 "--label",
                 SERIOUS_LABELS[1],
             ],
-            cwd=self.repo_root,
+            body,
         )
         return _extract_issue_number(result.stdout.strip())
 
@@ -857,9 +863,9 @@ class OsteoblastController:
         return items[0] if items else None
 
     def comment_on_issue(self, issue_number: int, body: str) -> None:
-        self.runner.run(
-            ["gh", "issue", "comment", str(issue_number), "--body", body],
-            cwd=self.repo_root,
+        self._run_gh_with_body(
+            ["gh", "issue", "comment", str(issue_number)],
+            body,
         )
 
     def fallback_assign_copilot(self, issue_number: int) -> None:

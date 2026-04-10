@@ -643,6 +643,75 @@ class ControllerTests(unittest.TestCase):
             rewritten = manifest_path.read_text(encoding="utf-8")
             self.assertIn('include_paths = ["documentation", "packages"]', rewritten)
 
+    def test_create_tracking_issue_streams_body_via_stdin(self) -> None:
+        def run_issue_create(*, args, cwd=None, env=None, input_text=None, check=True):
+            self.assertEqual(args[:3], ["gh", "issue", "create"])
+            self.assertIn("--title", args)
+            self.assertIn("--body-file", args)
+            self.assertIn("-", args)
+            self.assertNotIn("--body", args)
+            self.assertEqual(cwd, ROOT)
+            assert input_text is not None
+            self.assertIn("## Serious Osteoblast finding", input_text)
+            self.assertIn('"severity": "serious"', input_text)
+            self.assertIn("Input is used without validation.", input_text)
+            return CommandResult(
+                args=tuple(args),
+                stdout="https://github.com/acme/repo/issues/42\n",
+                stderr="",
+                returncode=0,
+            )
+
+        runner = PrefixRunner([(("gh", "issue", "create"), run_issue_create)])
+        controller = OsteoblastController(
+            repo_root=ROOT,
+            core_root=ROOT,
+            runner=runner,
+            today=date(2026, 4, 10),
+        )
+        issue_number = controller.create_tracking_issue(make_finding(severity="serious"))
+        self.assertEqual(issue_number, 42)
+
+    def test_open_pr_streams_body_via_stdin(self) -> None:
+        def run_pr_create(*, args, cwd=None, env=None, input_text=None, check=True):
+            self.assertEqual(args[:3], ["gh", "pr", "create"])
+            self.assertIn("--body-file", args)
+            self.assertIn("-", args)
+            self.assertNotIn("--body", args)
+            self.assertEqual(cwd, ROOT)
+            assert input_text is not None
+            self.assertIn("## Summary", input_text)
+            self.assertIn("## Verification", input_text)
+            self.assertIn("python -m unittest", input_text)
+            return CommandResult(
+                args=tuple(args),
+                stdout="https://github.com/acme/repo/pull/7\n",
+                stderr="",
+                returncode=0,
+            )
+
+        runner = PrefixRunner(
+            [
+                (("git", "add", "--all"), CommandResult(args=("git", "add", "--all"), stdout="", stderr="", returncode=0)),
+                (("git", "commit"), CommandResult(args=("git", "commit"), stdout="", stderr="", returncode=0)),
+                (("git", "push"), CommandResult(args=("git", "push"), stdout="", stderr="", returncode=0)),
+                (("gh", "pr", "create"), run_pr_create),
+            ]
+        )
+        controller = OsteoblastController(
+            repo_root=ROOT,
+            core_root=ROOT,
+            runner=runner,
+            today=date(2026, 4, 10),
+        )
+        pr_url = controller.open_pr(
+            finding=make_finding(),
+            manifest=make_manifest(),
+            branch_name="osteoblast/hardening/src-service/20260410",
+            verification_commands=("python -m unittest",),
+        )
+        self.assertEqual(pr_url, "https://github.com/acme/repo/pull/7")
+
     def test_escalate_serious_finding_falls_back_to_copilot_assignee(self) -> None:
         issue_create = CommandResult(
             args=("gh", "issue", "create"),
