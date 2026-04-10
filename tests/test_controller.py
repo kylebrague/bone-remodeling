@@ -107,6 +107,15 @@ class ControllerTests(unittest.TestCase):
             self.assertIn("acme/osteoblast-core", contents)
             self.assertIn("v1.2.3", contents)
             self.assertTrue((target_root / ".github" / "hooks" / "scripts" / "pre_tool_policy.py").exists())
+            self.assertTrue(
+                (
+                    target_root
+                    / ".github"
+                    / "skills"
+                    / "osteoblast-manifest-setup"
+                    / "SKILL.md"
+                ).exists()
+            )
 
     def test_branch_name_matches_plan(self) -> None:
         controller = OsteoblastController(
@@ -147,6 +156,226 @@ class ControllerTests(unittest.TestCase):
         )
         with self.assertRaises(OsteoblastError):
             controller.validate_routine_diff(make_finding(), make_manifest())
+
+    def test_pick_scope_error_mentions_configured_and_existing_paths(self) -> None:
+        manifest = Manifest.from_mapping(
+            {
+                "version": "1",
+                "base_branch": "main",
+                "include_paths": ["src", "app", "lib", "docs"],
+                "exclude_paths": [],
+                "allowed_categories": ["bugs"],
+                "severity_rules": {"confidence_threshold": 0.75},
+                "max_files_changed": 5,
+                "max_changed_lines": 150,
+                "verify": {"commands": ["python -m unittest"]},
+                "pr": {"labels": ["osteoblast"], "reviewers": []},
+                "schedule": {"enabled": True},
+            }
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            (repo_root / "packages").mkdir()
+            (repo_root / "documentation").mkdir()
+            controller = OsteoblastController(
+                repo_root=repo_root,
+                core_root=ROOT,
+                today=date(2026, 4, 10),
+            )
+            with self.assertRaises(OsteoblastError) as context:
+                controller.pick_scope(manifest)
+            message = str(context.exception)
+            self.assertIn("Configured include_paths: src, app, lib, docs", message)
+            self.assertIn("documentation, packages", message)
+
+    def test_doctor_reports_missing_manifest_and_suggested_scopes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            (repo_root / "packages").mkdir()
+            (repo_root / "documentation").mkdir()
+            controller = OsteoblastController(
+                repo_root=repo_root,
+                core_root=ROOT,
+                today=date(2026, 4, 10),
+            )
+            result = controller.doctor()
+            self.assertEqual(result["status"], "error")
+            checks = {check["name"]: check for check in result["checks"]}
+            self.assertEqual(checks["manifest"]["status"], "error")
+            self.assertTrue(any("packages" in suggestion for suggestion in result["suggestions"]))
+
+    def test_doctor_reports_placeholder_verify_and_scope_problem(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            (repo_root / ".git").mkdir()
+            (repo_root / ".github" / "agents").mkdir(parents=True)
+            (repo_root / ".github" / "hooks").mkdir(parents=True)
+            (repo_root / ".github" / "skills" / "osteoblast-manifest-setup").mkdir(parents=True)
+            (repo_root / ".github" / "workflows").mkdir(parents=True)
+            (repo_root / "packages").mkdir()
+            manifest_path = repo_root / ".github" / "osteoblast.toml"
+            manifest_path.write_text(
+                "\n".join(
+                    [
+                        'version = "1"',
+                        'base_branch = "main"',
+                        'include_paths = ["src", "docs"]',
+                        'exclude_paths = []',
+                        'allowed_categories = ["bugs"]',
+                        'max_files_changed = 5',
+                        'max_changed_lines = 150',
+                        "",
+                        "[severity_rules]",
+                        "confidence_threshold = 0.75",
+                        "",
+                        "[verify]",
+                        'commands = ["echo \\"Replace verify.commands in .github/osteoblast.toml with real repo checks\\" && exit 1"]',
+                        "",
+                        "[pr]",
+                        'labels = ["osteoblast"]',
+                        "reviewers = []",
+                        "",
+                        "[schedule]",
+                        "enabled = true",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (repo_root / ".github" / "workflows" / "osteoblast.yml").write_text("name: test\n", encoding="utf-8")
+            (repo_root / ".github" / "agents" / "osteoblast.agent.md").write_text("---\nname: osteoblast\n---\n", encoding="utf-8")
+            (repo_root / ".github" / "agents" / "osteoblast-worker.agent.md").write_text("---\nname: osteoblast-worker\n---\n", encoding="utf-8")
+            (repo_root / ".github" / "hooks" / "hooks.json").write_text("{}", encoding="utf-8")
+            (
+                repo_root / ".github" / "skills" / "osteoblast-manifest-setup" / "SKILL.md"
+            ).write_text("---\nname: osteoblast-manifest-setup\n---\n", encoding="utf-8")
+
+            controller = OsteoblastController(
+                repo_root=repo_root,
+                core_root=ROOT,
+                today=date(2026, 4, 10),
+            )
+            result = controller.doctor()
+            self.assertEqual(result["status"], "error")
+            checks = {check["name"]: check for check in result["checks"]}
+            self.assertEqual(checks["manifest"]["status"], "ok")
+            self.assertEqual(checks["manifest:include_paths"]["status"], "warn")
+            self.assertEqual(checks["scope-selection"]["status"], "error")
+            self.assertEqual(checks["manifest:verify"]["status"], "warn")
+
+    def test_doctor_reports_healthy_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            (repo_root / ".git").mkdir()
+            (repo_root / ".github" / "agents").mkdir(parents=True)
+            (repo_root / ".github" / "hooks").mkdir(parents=True)
+            (repo_root / ".github" / "skills" / "osteoblast-manifest-setup").mkdir(parents=True)
+            (repo_root / ".github" / "workflows").mkdir(parents=True)
+            (repo_root / "packages").mkdir()
+            manifest_path = repo_root / ".github" / "osteoblast.toml"
+            manifest_path.write_text(
+                "\n".join(
+                    [
+                        'version = "1"',
+                        'base_branch = "main"',
+                        'include_paths = ["packages"]',
+                        'exclude_paths = []',
+                        'allowed_categories = ["bugs"]',
+                        'max_files_changed = 5',
+                        'max_changed_lines = 150',
+                        "",
+                        "[severity_rules]",
+                        "confidence_threshold = 0.75",
+                        "",
+                        "[verify]",
+                        'commands = ["python -m unittest"]',
+                        "",
+                        "[pr]",
+                        'labels = ["osteoblast"]',
+                        "reviewers = []",
+                        "",
+                        "[schedule]",
+                        "enabled = true",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (repo_root / ".github" / "workflows" / "osteoblast.yml").write_text("name: test\n", encoding="utf-8")
+            (repo_root / ".github" / "agents" / "osteoblast.agent.md").write_text("---\nname: osteoblast\n---\n", encoding="utf-8")
+            (repo_root / ".github" / "agents" / "osteoblast-worker.agent.md").write_text("---\nname: osteoblast-worker\n---\n", encoding="utf-8")
+            (repo_root / ".github" / "hooks" / "hooks.json").write_text("{}", encoding="utf-8")
+            (
+                repo_root / ".github" / "skills" / "osteoblast-manifest-setup" / "SKILL.md"
+            ).write_text("---\nname: osteoblast-manifest-setup\n---\n", encoding="utf-8")
+
+            controller = OsteoblastController(
+                repo_root=repo_root,
+                core_root=ROOT,
+                today=date(2026, 4, 10),
+            )
+            result = controller.doctor()
+            self.assertEqual(result["status"], "ok")
+            checks = {check["name"]: check for check in result["checks"]}
+            self.assertEqual(checks["scope-selection"]["status"], "ok")
+            self.assertEqual(checks["manifest:verify"]["status"], "ok")
+
+    def test_doctor_fix_rewrites_include_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            (repo_root / ".git").mkdir()
+            (repo_root / ".github" / "agents").mkdir(parents=True)
+            (repo_root / ".github" / "hooks").mkdir(parents=True)
+            (repo_root / ".github" / "skills" / "osteoblast-manifest-setup").mkdir(parents=True)
+            (repo_root / ".github" / "workflows").mkdir(parents=True)
+            (repo_root / "packages").mkdir()
+            (repo_root / "documentation").mkdir()
+            manifest_path = repo_root / ".github" / "osteoblast.toml"
+            manifest_path.write_text(
+                "\n".join(
+                    [
+                        'version = "1"',
+                        'base_branch = "main"',
+                        'include_paths = ["src", "docs"]',
+                        'exclude_paths = []',
+                        'allowed_categories = ["bugs"]',
+                        'max_files_changed = 5',
+                        'max_changed_lines = 150',
+                        "",
+                        "[severity_rules]",
+                        "confidence_threshold = 0.75",
+                        "",
+                        "[verify]",
+                        'commands = ["python -m unittest"]',
+                        "",
+                        "[pr]",
+                        'labels = ["osteoblast"]',
+                        "reviewers = []",
+                        "",
+                        "[schedule]",
+                        "enabled = true",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (repo_root / ".github" / "workflows" / "osteoblast.yml").write_text("name: test\n", encoding="utf-8")
+            (repo_root / ".github" / "agents" / "osteoblast.agent.md").write_text("---\nname: osteoblast\n---\n", encoding="utf-8")
+            (repo_root / ".github" / "agents" / "osteoblast-worker.agent.md").write_text("---\nname: osteoblast-worker\n---\n", encoding="utf-8")
+            (repo_root / ".github" / "hooks" / "hooks.json").write_text("{}", encoding="utf-8")
+            (
+                repo_root / ".github" / "skills" / "osteoblast-manifest-setup" / "SKILL.md"
+            ).write_text("---\nname: osteoblast-manifest-setup\n---\n", encoding="utf-8")
+
+            controller = OsteoblastController(
+                repo_root=repo_root,
+                core_root=ROOT,
+                today=date(2026, 4, 10),
+            )
+            result = controller.doctor(fix=True)
+            self.assertEqual(result["status"], "ok")
+            self.assertIn("applied_fixes", result)
+            self.assertEqual(result["applied_fixes"][0]["before"], ["src", "docs"])
+            self.assertEqual(result["applied_fixes"][0]["after"], ["documentation", "packages"])
+            rewritten = manifest_path.read_text(encoding="utf-8")
+            self.assertIn('include_paths = ["documentation", "packages"]', rewritten)
 
     def test_escalate_serious_finding_falls_back_to_copilot_assignee(self) -> None:
         issue_create = CommandResult(

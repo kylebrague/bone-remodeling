@@ -7,10 +7,11 @@ import hashlib
 import json
 import os
 import re
+import shutil
 from typing import Any
 
 from .commands import CommandError, CommandRunner
-from .models import Finding, Manifest, OsteoblastError
+from .models import Finding, Manifest, ManifestError, OsteoblastError
 from .templates import copy_paths, render_tree
 
 
@@ -86,6 +87,197 @@ class OsteoblastController:
         manifest_path = self.repo_root / ".github" / "osteoblast.toml"
         return Manifest.from_path(manifest_path)
 
+    def doctor(self, *, fix: bool = False) -> dict[str, Any]:
+        applied_fixes: list[dict[str, Any]] = []
+
+        if fix:
+            manifest_path = self.repo_root / ".github" / "osteoblast.toml"
+            if manifest_path.exists():
+                try:
+                    manifest = self.load_manifest()
+                except ManifestError:
+                    manifest = None
+                if manifest is not None:
+                    configured = tuple(manifest.include_paths)
+                    missing_include_paths = [
+                        relative
+                        for relative in manifest.include_paths
+                        if not (self.repo_root / relative).exists()
+                    ]
+                    has_eligible_scopes = any(
+                        not manifest.scope_is_excluded(self.repo_root, path)
+                        for path in manifest.allowed_scope_paths(self.repo_root)
+                    )
+                    suggested_paths = self._suggest_fix_include_paths()
+                    if suggested_paths and (missing_include_paths or not has_eligible_scopes):
+                        if self._rewrite_manifest_include_paths(manifest_path, suggested_paths):
+                            applied_fixes.append(
+                                {
+                                    "name": "manifest:include_paths",
+                                    "detail": "Rewrote include_paths to detected repo directories.",
+                                    "before": list(configured),
+                                    "after": list(suggested_paths),
+                                    "path": str(manifest_path),
+                                }
+                            )
+
+        result = self._doctor_report()
+        if applied_fixes:
+            result["applied_fixes"] = applied_fixes
+        return result
+
+    def _doctor_report(self) -> dict[str, Any]:
+        checks: list[dict[str, Any]] = []
+        suggestions: list[str] = []
+
+        def add_check(name: str, status: str, detail: str, **extra: Any) -> None:
+            payload: dict[str, Any] = {"name": name, "status": status, "detail": detail}
+            payload.update(extra)
+            checks.append(payload)
+
+        add_check(
+            "repo-root",
+            "ok" if self.repo_root.exists() else "error",
+            f"Using repo root `{self.repo_root}`.",
+            path=str(self.repo_root),
+        )
+
+        git_dir = self.repo_root / ".git"
+        add_check(
+            "git-repo",
+            "ok" if git_dir.exists() else "warn",
+            "Git metadata found." if git_dir.exists() else "`.git` was not found at repo root.",
+            path=str(git_dir),
+        )
+
+        core_plugin = self.core_root / "plugin.json"
+        add_check(
+            "core-root",
+            "ok" if core_plugin.exists() else "error",
+            "Core plugin manifest found."
+            if core_plugin.exists()
+            else "Core root does not look like the Osteoblast repo; `plugin.json` is missing.",
+            path=str(self.core_root),
+        )
+
+        for command_name in ("git", "gh", "copilot", "python3"):
+            location = shutil.which(command_name)
+            add_check(
+                f"command:{command_name}",
+                "ok" if location else "error",
+                f"`{command_name}` is available at `{location}`."
+                if location
+                else f"`{command_name}` is not on PATH.",
+                path=location,
+            )
+
+        workflow_path = self.repo_root / ".github" / "workflows" / "osteoblast.yml"
+        add_check(
+            "workflow",
+            "ok" if workflow_path.exists() else "warn",
+            "Workflow file found."
+            if workflow_path.exists()
+            else "Missing `.github/workflows/osteoblast.yml`; run bootstrap or add the workflow manually.",
+            path=str(workflow_path),
+        )
+
+        for relative, name in (
+            (".github/agents/osteoblast.agent.md", "agent:osteoblast"),
+            (".github/agents/osteoblast-worker.agent.md", "agent:osteoblast-worker"),
+            (".github/skills/osteoblast-manifest-setup/SKILL.md", "skill:osteoblast-manifest-setup"),
+            (".github/hooks/hooks.json", "hooks"),
+        ):
+            path = self.repo_root / relative
+            add_check(
+                name,
+                "ok" if path.exists() else "warn",
+                f"`{relative}` found."
+                if path.exists()
+                else f"`{relative}` is missing from the target repo overlay.",
+                path=str(path),
+            )
+
+        manifest_path = self.repo_root / ".github" / "osteoblast.toml"
+        if not manifest_path.exists():
+            add_check(
+                "manifest",
+                "error",
+                "Missing `.github/osteoblast.toml`; run bootstrap first.",
+                path=str(manifest_path),
+            )
+            suggested = self._suggest_scope_paths()
+            if suggested:
+                suggestions.append(
+                    "Suggested include_paths based on repo layout: " + ", ".join(suggested)
+                )
+            return self._doctor_result(checks, suggestions)
+
+        try:
+            manifest = self.load_manifest()
+        except ManifestError as exc:
+            add_check("manifest", "error", str(exc), path=str(manifest_path))
+            suggested = self._suggest_scope_paths()
+            if suggested:
+                suggestions.append(
+                    "Suggested include_paths based on repo layout: " + ", ".join(suggested)
+                )
+            return self._doctor_result(checks, suggestions)
+
+        add_check("manifest", "ok", "Manifest parsed successfully.", path=str(manifest_path))
+
+        missing_include_paths = [
+            relative
+            for relative in manifest.include_paths
+            if not (self.repo_root / relative).exists()
+        ]
+        if missing_include_paths:
+            add_check(
+                "manifest:include_paths",
+                "warn",
+                "Some configured include_paths do not exist.",
+                configured=list(manifest.include_paths),
+                missing=missing_include_paths,
+            )
+            suggestions.append(
+                "Update include_paths to existing directories such as: "
+                + ", ".join(self._suggest_scope_paths() or ("<none>",))
+            )
+        else:
+            add_check(
+                "manifest:include_paths",
+                "ok",
+                "All configured include_paths exist.",
+                configured=list(manifest.include_paths),
+            )
+
+        try:
+            chosen_scope = self.pick_scope(manifest)
+            add_check(
+                "scope-selection",
+                "ok",
+                f"One eligible scope is `{chosen_scope.relative_to(self.repo_root).as_posix()}`.",
+            )
+        except OsteoblastError as exc:
+            add_check("scope-selection", "error", str(exc))
+
+        if any("Replace verify.commands" in command for command in manifest.verify.commands):
+            add_check(
+                "manifest:verify",
+                "warn",
+                "Manifest still contains the placeholder verify command. Replace it with real repo checks.",
+                commands=list(manifest.verify.commands),
+            )
+            suggestions.append("Replace `verify.commands` with real lint/test/typecheck commands.")
+        else:
+            add_check(
+                "manifest:verify",
+                "ok",
+                "verify.commands is configured.",
+                commands=list(manifest.verify.commands),
+            )
+
+        return self._doctor_result(checks, suggestions)
+
     def pick_scope(self, manifest: Manifest) -> Path:
         eligible = [
             path
@@ -93,7 +285,14 @@ class OsteoblastController:
             if not manifest.scope_is_excluded(self.repo_root, path)
         ]
         if not eligible:
-            raise OsteoblastError("No eligible scopes were found in `.github/osteoblast.toml`.")
+            configured = ", ".join(manifest.include_paths) or "<none>"
+            suggestions = ", ".join(self._suggest_scope_paths()) or "<none>"
+            raise OsteoblastError(
+                "No eligible scopes were found in `.github/osteoblast.toml`. "
+                f"Configured include_paths: {configured}. "
+                f"Existing top-level candidates in this repo: {suggestions}. "
+                "Update `.github/osteoblast.toml` include_paths or pass `--scope <path>`."
+            )
         ordering = sorted(
             eligible,
             key=lambda path: hashlib.sha256(
@@ -103,6 +302,108 @@ class OsteoblastController:
             ).hexdigest(),
         )
         return ordering[0]
+
+    def _suggest_scope_paths(self) -> tuple[str, ...]:
+        preferred = (
+            "src",
+            "app",
+            "lib",
+            "docs",
+            "documentation",
+            "packages",
+            "services",
+            "internal",
+            "cmd",
+            "specs",
+            "infra",
+        )
+        ignored = {
+            ".git",
+            ".github",
+            ".codex",
+            ".claude",
+            ".vscode",
+            "node_modules",
+            "dist",
+            "build",
+            "vendor",
+        }
+        children = {path.name: path for path in self.repo_root.iterdir()}
+        ordered = [name for name in preferred if name in children and name not in ignored]
+        extras = sorted(
+            name
+            for name, path in children.items()
+            if path.is_dir() and name not in ignored and name not in ordered and not name.startswith(".")
+        )
+        return tuple((ordered + extras)[:8])
+
+    def _suggest_fix_include_paths(self) -> tuple[str, ...]:
+        safe_preferred = (
+            "src",
+            "app",
+            "lib",
+            "docs",
+            "documentation",
+            "packages",
+            "services",
+            "internal",
+            "cmd",
+            "specs",
+        )
+        children = {path.name: path for path in self.repo_root.iterdir()}
+        suggested = tuple(
+            name for name in safe_preferred if name in children and children[name].is_dir()
+        )
+        if suggested:
+            return suggested
+        fallback = tuple(
+            name for name in self._suggest_scope_paths() if name not in {"infra", "ralph"}
+        )
+        return fallback or self._suggest_scope_paths()
+
+    def _rewrite_manifest_include_paths(
+        self,
+        manifest_path: Path,
+        include_paths: tuple[str, ...],
+    ) -> bool:
+        replacement = "include_paths = [" + ", ".join(json.dumps(path) for path in include_paths) + "]"
+        original = manifest_path.read_text(encoding="utf-8")
+        updated, count = re.subn(
+            r"(?m)^include_paths\s*=\s*\[[^\n]*\]\s*$",
+            replacement,
+            original,
+            count=1,
+        )
+        if count == 0:
+            base_branch_pattern = re.compile(r"(?m)^base_branch\s*=\s*[^\n]+$")
+            match = base_branch_pattern.search(original)
+            if not match:
+                raise OsteoblastError(
+                    "Could not rewrite include_paths because neither `include_paths` nor `base_branch` was found."
+                )
+            insertion = match.group(0) + "\n" + replacement
+            updated = original[: match.start()] + insertion + original[match.end() :]
+        if updated == original:
+            return False
+        manifest_path.write_text(updated, encoding="utf-8")
+        return True
+
+    @staticmethod
+    def _doctor_result(
+        checks: list[dict[str, Any]],
+        suggestions: list[str],
+    ) -> dict[str, Any]:
+        statuses = [check["status"] for check in checks]
+        overall = "ok"
+        if any(status == "error" for status in statuses):
+            overall = "error"
+        elif any(status == "warn" for status in statuses):
+            overall = "warn"
+        return {
+            "status": overall,
+            "checks": checks,
+            "suggestions": suggestions,
+        }
 
     def has_open_routine_pr(self) -> bool:
         result = self.runner.run(

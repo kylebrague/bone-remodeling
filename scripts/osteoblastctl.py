@@ -42,6 +42,13 @@ def build_parser() -> argparse.ArgumentParser:
     discover = subparsers.add_parser("discover", help="Run discovery for one scope.")
     discover.add_argument("--scope", help="Optional relative scope path to analyze.")
 
+    doctor = subparsers.add_parser("doctor", help="Diagnose target-repo installation and manifest issues.")
+    doctor.add_argument(
+        "--fix",
+        action="store_true",
+        help="Safely repair manifest include_paths when they do not match the repo layout.",
+    )
+
     execute = subparsers.add_parser("execute", help="Execute one finding payload from JSON.")
     execute.add_argument("--finding-file", required=True, help="Path to a JSON file containing the finding payload.")
 
@@ -86,6 +93,11 @@ def main() -> int:
         finding = controller.discover(scope=scope)
         print(json.dumps(controller._finding_payload(finding), indent=2) if finding else json.dumps({"status": "no-finding"}))
         return 0
+
+    if args.command == "doctor":
+        result = controller.doctor(fix=args.fix)
+        print(json.dumps(result, indent=2))
+        return 0 if result["status"] != "error" else 1
 
     if args.command == "execute":
         from osteoblast_core.models import Finding  # noqa: E402

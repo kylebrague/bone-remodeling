@@ -1,6 +1,6 @@
 version = "1"
 base_branch = "main"
-include_paths = ["src", "app", "lib", "docs"]
+include_paths = ["src", "app", "lib", "docs", "packages", "documentation", "specs"]
 exclude_paths = ["dist/**", "build/**", "vendor/**", "node_modules/**"]
 allowed_categories = ["bugs", "dead-code", "hardening", "consistency", "readability", "performance", "docs"]
 max_files_changed = 5
