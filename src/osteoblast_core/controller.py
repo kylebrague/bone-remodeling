@@ -9,7 +9,7 @@ import os
 import re
 import shutil
 import tempfile
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from .commands import CommandError, CommandRunner, CommandResult
 from .models import Finding, Manifest, ManifestError, OsteoblastError
@@ -18,6 +18,16 @@ from .templates import copy_paths, render_tree
 
 SERIOUS_LABELS = ("osteoblast", "serious")
 ROUTINE_LABEL = "osteoblast"
+LABEL_SPECS = {
+    "osteoblast": {
+        "color": "0E8A16",
+        "description": "Automated maintenance issue or pull request opened by Osteoblast.",
+    },
+    "serious": {
+        "color": "B60205",
+        "description": "Requires serious escalation and cloud-agent remediation.",
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -750,6 +760,63 @@ class OsteoblastController:
             input_text=body,
         )
 
+    def _label_exists(self, label: str) -> bool:
+        result = self.runner.run(
+            [
+                "gh",
+                "label",
+                "list",
+                "--search",
+                label,
+                "--limit",
+                "100",
+                "--json",
+                "name",
+            ],
+            cwd=self.repo_root,
+        )
+        items = json.loads(result.stdout or "[]")
+        return any(
+            isinstance(item, dict)
+            and isinstance(item.get("name"), str)
+            and item["name"].casefold() == label.casefold()
+            for item in items
+        )
+
+    def ensure_labels_exist(self, labels: Iterable[str]) -> None:
+        seen: set[str] = set()
+        for label in labels:
+            normalized = label.strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            if self._label_exists(normalized):
+                continue
+            spec = LABEL_SPECS.get(
+                normalized,
+                {
+                    "color": "D4C5F9",
+                    "description": f"Project label used by Osteoblast automation: {normalized}.",
+                },
+            )
+            try:
+                self.runner.run(
+                    [
+                        "gh",
+                        "label",
+                        "create",
+                        normalized,
+                        "--color",
+                        spec["color"],
+                        "--description",
+                        spec["description"],
+                    ],
+                    cwd=self.repo_root,
+                )
+            except CommandError as exc:
+                if "already exists" not in exc.stderr.casefold():
+                    raise
+
     def open_pr(
         self,
         *,
@@ -767,6 +834,7 @@ class OsteoblastController:
             ["git", "push", "--set-upstream", "origin", branch_name],
             cwd=self.repo_root,
         )
+        self.ensure_labels_exist(manifest.pr.labels)
         command = [
             "gh",
             "pr",
@@ -807,6 +875,7 @@ class OsteoblastController:
                 "```",
             ]
         )
+        self.ensure_labels_exist(SERIOUS_LABELS)
         result = self._run_gh_with_body(
             [
                 "gh",

@@ -644,6 +644,22 @@ class ControllerTests(unittest.TestCase):
             self.assertIn('include_paths = ["documentation", "packages"]', rewritten)
 
     def test_create_tracking_issue_streams_body_via_stdin(self) -> None:
+        def run_label_list(*, args, cwd=None, env=None, input_text=None, check=True):
+            self.assertEqual(args[:3], ["gh", "label", "list"])
+            label = args[args.index("--search") + 1]
+            payload = [{"name": label}] if label == "osteoblast" else []
+            return CommandResult(
+                args=tuple(args),
+                stdout=json.dumps(payload),
+                stderr="",
+                returncode=0,
+            )
+
+        def run_label_create(*, args, cwd=None, env=None, input_text=None, check=True):
+            self.assertEqual(args[:3], ["gh", "label", "create"])
+            self.assertEqual(args[3], "serious")
+            return CommandResult(args=tuple(args), stdout="", stderr="", returncode=0)
+
         def run_issue_create(*, args, cwd=None, env=None, input_text=None, check=True):
             self.assertEqual(args[:3], ["gh", "issue", "create"])
             self.assertIn("--title", args)
@@ -662,7 +678,13 @@ class ControllerTests(unittest.TestCase):
                 returncode=0,
             )
 
-        runner = PrefixRunner([(("gh", "issue", "create"), run_issue_create)])
+        runner = PrefixRunner(
+            [
+                (("gh", "label", "list"), run_label_list),
+                (("gh", "label", "create"), run_label_create),
+                (("gh", "issue", "create"), run_issue_create),
+            ]
+        )
         controller = OsteoblastController(
             repo_root=ROOT,
             core_root=ROOT,
@@ -673,6 +695,15 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(issue_number, 42)
 
     def test_open_pr_streams_body_via_stdin(self) -> None:
+        def run_label_list(*, args, cwd=None, env=None, input_text=None, check=True):
+            self.assertEqual(args[:3], ["gh", "label", "list"])
+            return CommandResult(
+                args=tuple(args),
+                stdout=json.dumps([{"name": "osteoblast"}]),
+                stderr="",
+                returncode=0,
+            )
+
         def run_pr_create(*, args, cwd=None, env=None, input_text=None, check=True):
             self.assertEqual(args[:3], ["gh", "pr", "create"])
             self.assertIn("--body-file", args)
@@ -695,6 +726,7 @@ class ControllerTests(unittest.TestCase):
                 (("git", "add", "--all"), CommandResult(args=("git", "add", "--all"), stdout="", stderr="", returncode=0)),
                 (("git", "commit"), CommandResult(args=("git", "commit"), stdout="", stderr="", returncode=0)),
                 (("git", "push"), CommandResult(args=("git", "push"), stdout="", stderr="", returncode=0)),
+                (("gh", "label", "list"), run_label_list),
                 (("gh", "pr", "create"), run_pr_create),
             ]
         )
@@ -712,6 +744,39 @@ class ControllerTests(unittest.TestCase):
         )
         self.assertEqual(pr_url, "https://github.com/acme/repo/pull/7")
 
+    def test_ensure_labels_exist_creates_missing_labels(self) -> None:
+        def run_label_list(*, args, cwd=None, env=None, input_text=None, check=True):
+            self.assertEqual(args[:3], ["gh", "label", "list"])
+            return CommandResult(
+                args=tuple(args),
+                stdout="[]",
+                stderr="",
+                returncode=0,
+            )
+
+        created: list[tuple[str, ...]] = []
+
+        def run_label_create(*, args, cwd=None, env=None, input_text=None, check=True):
+            created.append(tuple(args))
+            return CommandResult(args=tuple(args), stdout="", stderr="", returncode=0)
+
+        runner = PrefixRunner(
+            [
+                (("gh", "label", "list"), run_label_list),
+                (("gh", "label", "create"), run_label_create),
+            ]
+        )
+        controller = OsteoblastController(
+            repo_root=ROOT,
+            core_root=ROOT,
+            runner=runner,
+            today=date(2026, 4, 10),
+        )
+        controller.ensure_labels_exist(("osteoblast", "serious"))
+        self.assertEqual(len(created), 2)
+        self.assertEqual(created[0][:4], ("gh", "label", "create", "osteoblast"))
+        self.assertEqual(created[1][:4], ("gh", "label", "create", "serious"))
+
     def test_escalate_serious_finding_falls_back_to_copilot_assignee(self) -> None:
         issue_create = CommandResult(
             args=("gh", "issue", "create"),
@@ -721,8 +786,19 @@ class ControllerTests(unittest.TestCase):
         )
         issue_edit = CommandResult(args=("gh", "issue", "edit"), stdout="", stderr="", returncode=0)
         issue_comment = CommandResult(args=("gh", "issue", "comment"), stdout="", stderr="", returncode=0)
+
+        def run_label_list(*, args, cwd=None, env=None, input_text=None, check=True):
+            label = args[args.index("--search") + 1]
+            return CommandResult(
+                args=tuple(args),
+                stdout=json.dumps([{"name": label}]),
+                stderr="",
+                returncode=0,
+            )
+
         runner = PrefixRunner(
             [
+                (("gh", "label", "list"), run_label_list),
                 (("gh", "issue", "create"), issue_create),
                 (
                     ("gh", "agent-task", "create"),
@@ -765,8 +841,19 @@ class ControllerTests(unittest.TestCase):
             returncode=0,
         )
         issue_comment = CommandResult(args=("gh", "issue", "comment"), stdout="", stderr="", returncode=0)
+
+        def run_label_list(*, args, cwd=None, env=None, input_text=None, check=True):
+            label = args[args.index("--search") + 1]
+            return CommandResult(
+                args=tuple(args),
+                stdout=json.dumps([{"name": label}]),
+                stderr="",
+                returncode=0,
+            )
+
         runner = PrefixRunner(
             [
+                (("gh", "label", "list"), run_label_list),
                 (("gh", "issue", "create"), issue_create),
                 (("gh", "agent-task", "create"), agent_task_create),
                 (("gh", "agent-task", "list"), agent_task_list),
