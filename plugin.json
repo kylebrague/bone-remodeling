@@ -1,0 +1,19 @@
+{
+  "name": "osteoblast",
+  "description": "Background repository remodeling workflows for GitHub Copilot CLI and GitHub Copilot cloud agent.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Kyle Brague"
+  },
+  "license": "MIT",
+  "keywords": [
+    "copilot",
+    "github",
+    "maintenance",
+    "automation",
+    "repository"
+  ],
+  "agents": "agents/",
+  "skills": "skills/",
+  "hooks": "hooks.json"
+}

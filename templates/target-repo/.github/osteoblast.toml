@@ -1,0 +1,24 @@
+version = "1"
+base_branch = "main"
+include_paths = ["src", "app", "lib", "docs"]
+exclude_paths = ["dist/**", "build/**", "vendor/**", "node_modules/**"]
+allowed_categories = ["bugs", "dead-code", "hardening", "consistency", "readability", "performance", "docs"]
+max_files_changed = 5
+max_changed_lines = 150
+
+[severity_rules]
+confidence_threshold = 0.75
+serious_path_keywords = ["auth", "security", "secret", "permission", ".github/workflows", "migration", "migrations", "schema", "infra", "terraform"]
+public_api_globs = ["public/**", "**/public/**", "api/**", "**/api/**", "**/*.proto", "**/openapi*.yml", "**/openapi*.yaml", "**/openapi*.json", "**/swagger*.json"]
+forbidden_local_globs = [".github/workflows/**", "**/migrations/**", "**/migration/**", "**/schema/**", "**/*.sql"]
+
+[verify]
+commands = ["echo \"Replace verify.commands in .github/osteoblast.toml with real repo checks\" && exit 1"]
+
+[pr]
+labels = ["osteoblast"]
+reviewers = []
+
+[schedule]
+enabled = true
+cron = "17 5 * * 1-5"

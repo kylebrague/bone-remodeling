@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "python3 hooks/scripts/session_banner.py",
+        "cwd": ".",
+        "timeoutSec": 10
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "python3 hooks/scripts/pre_tool_policy.py",
+        "cwd": ".",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}

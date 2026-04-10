@@ -1,0 +1,55 @@
+name: Osteoblast
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * 1-5"
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  osteoblast:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Checkout osteoblast core
+        uses: actions/checkout@v5
+        with:
+          repository: {{ core_repository }}
+          ref: {{ core_ref }}
+          path: .osteoblast-core
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install GitHub Copilot CLI
+        run: npm install -g @github/copilot
+
+      - name: Authenticate GitHub CLI
+        env:
+          GH_TOKEN: {{ gh_token_expression }}
+        run: gh auth status
+
+      - name: Run osteoblast scheduled sweep
+        env:
+          GH_TOKEN: {{ gh_token_expression }}
+          COPILOT_GITHUB_TOKEN: {{ copilot_token_expression }}
+        run: |
+          python .osteoblast-core/scripts/osteoblastctl.py \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --core-root "$GITHUB_WORKSPACE/.osteoblast-core" \
+            run-scheduled
