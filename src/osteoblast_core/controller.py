@@ -28,6 +28,8 @@ LABEL_SPECS = {
         "description": "Requires serious escalation and cloud-agent remediation.",
     },
 }
+SERIOUS_ISSUE_TITLE_PREFIX = "[Osteoblast serious] "
+MAX_SCHEDULED_DISCOVERY_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -481,9 +483,9 @@ class OsteoblastController:
         return None
 
     def has_open_serious_issue(self) -> bool:
-        return self.find_open_serious_issue() is not None
+        return bool(self.list_open_serious_issues())
 
-    def find_open_serious_issue(self, *, title: str | None = None) -> dict[str, Any] | None:
+    def list_open_serious_issues(self) -> tuple[dict[str, Any], ...]:
         result = self.runner.run(
             [
                 "gh",
@@ -501,6 +503,10 @@ class OsteoblastController:
             cwd=self.repo_root,
         )
         issues = json.loads(result.stdout or "[]")
+        return tuple(issue for issue in issues if isinstance(issue, dict))
+
+    def find_open_serious_issue(self, *, title: str | None = None) -> dict[str, Any] | None:
+        issues = self.list_open_serious_issues()
         if title is None:
             return issues[0] if issues else None
         for issue in issues:
@@ -584,6 +590,45 @@ class OsteoblastController:
         if len(stripped) <= limit:
             return stripped
         return stripped[:limit] + "\n...[truncated]"
+
+    @staticmethod
+    def _commit_title_from_serious_issue_title(title: str) -> str | None:
+        if not title.startswith(SERIOUS_ISSUE_TITLE_PREFIX):
+            return None
+        commit_title = title[len(SERIOUS_ISSUE_TITLE_PREFIX) :].strip()
+        return commit_title or None
+
+    def _serious_issue_exclusion_prompt(self, issues: Iterable[Mapping[str, Any]]) -> str:
+        issue_titles: list[str] = []
+        commit_titles: list[str] = []
+        for issue in issues:
+            title = issue.get("title")
+            if not isinstance(title, str):
+                continue
+            normalized = title.strip()
+            if not normalized or normalized in issue_titles:
+                continue
+            issue_titles.append(normalized)
+            commit_title = self._commit_title_from_serious_issue_title(normalized)
+            if commit_title and commit_title not in commit_titles:
+                commit_titles.append(commit_title)
+
+        if not issue_titles:
+            return ""
+
+        lines = [
+            "Before choosing a finding, review these already escalated open serious issues.",
+            "If a candidate would recreate one of them, skip it and continue searching for a different finding.",
+        ]
+        if commit_titles:
+            lines.append("Do not return a finding with any of these `commit_title` values:")
+            lines.extend(f"- `{commit_title}`" for commit_title in commit_titles)
+        lines.append("Already escalated serious issue titles:")
+        lines.extend(f"- {title}" for title in issue_titles)
+        lines.append(
+            "If every otherwise acceptable candidate is already represented above, return the documented no-finding object."
+        )
+        return "\n".join(lines)
 
     def _ensure_core_plugin_installed(self, env: Mapping[str, str]) -> None:
         copilot_home = env.get("COPILOT_HOME")
@@ -699,13 +744,18 @@ class OsteoblastController:
                 + "\n\n".join(details)
             ) from exc
 
-    def discover(self, *, scope: Path | None = None) -> Finding | None:
+    def discover(
+        self,
+        *,
+        scope: Path | None = None,
+        excluded_serious_issues: Iterable[Mapping[str, Any]] = (),
+    ) -> Finding | None:
         manifest = self.load_manifest()
         chosen_scope = scope or self.pick_scope(manifest)
         relative_scope = chosen_scope.relative_to(self.repo_root).as_posix()
         self.ensure_clean_worktree()
         allowed_categories = ", ".join(f"`{category}`" for category in manifest.allowed_categories)
-        prompt = (
+        prompt_parts = [
             "Discovery mode only. Analyze the repository scope "
             f"`{relative_scope}` and respond with JSON only. "
             "Use the osteoblast-finding-contract skill. "
@@ -714,7 +764,11 @@ class OsteoblastController:
             "For example, use `dead-code` instead of `dead tissue`. "
             "Do not edit repository files or run mutating commands. "
             "Return exactly one finding object, or the documented no-finding object if nothing acceptable exists."
-        )
+        ]
+        exclusion_prompt = self._serious_issue_exclusion_prompt(excluded_serious_issues)
+        if exclusion_prompt:
+            prompt_parts.extend(["", exclusion_prompt])
+        prompt = "\n".join(prompt_parts)
         env = {
             "OSTEOBLAST_READ_ONLY": "1",
             "OSTEOBLAST_SHOW_BANNER": "0",
@@ -863,7 +917,7 @@ class OsteoblastController:
         return self.commit_message_for(finding)
 
     def serious_issue_title_for(self, finding: Finding) -> str:
-        return f"[Osteoblast serious] {finding.commit_title}"
+        return f"{SERIOUS_ISSUE_TITLE_PREFIX}{finding.commit_title}"
 
     def pr_body_for(self, finding: Finding, verification_commands: tuple[str, ...]) -> str:
         body = [
@@ -1123,50 +1177,69 @@ class OsteoblastController:
         if not manifest.schedule.enabled:
             return {"status": "skipped", "reason": "schedule-disabled"}
 
-        finding = self.discover()
-        if finding is None:
-            return {"status": "no-finding"}
+        known_serious_issues = {
+            issue["title"]: issue
+            for issue in self.list_open_serious_issues()
+            if isinstance(issue.get("title"), str)
+        }
+        duplicate_issue: dict[str, Any] | None = None
+        duplicate_finding: Finding | None = None
+        for _ in range(MAX_SCHEDULED_DISCOVERY_ATTEMPTS):
+            finding = self.discover(excluded_serious_issues=tuple(known_serious_issues.values()))
+            if finding is None:
+                return {"status": "no-finding"}
 
-        if finding.severity == "serious":
-            issue = self.find_open_serious_issue(title=self.serious_issue_title_for(finding))
-            if issue:
+            if finding.severity == "serious":
+                title = self.serious_issue_title_for(finding)
+                issue = known_serious_issues.get(title)
+                if issue is None:
+                    issue = self.find_open_serious_issue(title=title)
+                    if issue and isinstance(issue.get("title"), str):
+                        known_serious_issues[issue["title"]] = issue
+                if issue:
+                    duplicate_issue = issue
+                    duplicate_finding = finding
+                    continue
+                escalation = self.escalate_serious_finding(finding, manifest)
+                return {"status": "serious", "finding": self._finding_payload(finding), **escalation}
+
+            pr = self.find_open_routine_pr(title=self.pr_title_for(finding))
+            if pr:
                 return {
                     "status": "skipped",
-                    "reason": "duplicate-serious-escalation",
-                    "issue": issue,
+                    "reason": "duplicate-osteoblast-pr",
+                    "pr": pr,
                     "finding": self._finding_payload(finding),
                 }
-            escalation = self.escalate_serious_finding(finding, manifest)
-            return {"status": "serious", "finding": self._finding_payload(finding), **escalation}
 
-        pr = self.find_open_routine_pr(title=self.pr_title_for(finding))
-        if pr:
+            branch_name = self.create_routine_branch(finding, manifest)
+            worker_report = self.execute(finding)
+            verification_commands = self.verify(manifest)
+            stats = self.validate_routine_diff(finding, manifest)
+            pr_url = self.open_pr(
+                finding=finding,
+                manifest=manifest,
+                branch_name=branch_name,
+                verification_commands=verification_commands,
+            )
             return {
-                "status": "skipped",
-                "reason": "duplicate-osteoblast-pr",
-                "pr": pr,
+                "status": "routine",
+                "branch": branch_name,
+                "pr_url": pr_url,
+                "worker_report": worker_report,
+                "changed_files": list(stats.files),
+                "changed_lines": stats.changed_lines,
                 "finding": self._finding_payload(finding),
             }
 
-        branch_name = self.create_routine_branch(finding, manifest)
-        worker_report = self.execute(finding)
-        verification_commands = self.verify(manifest)
-        stats = self.validate_routine_diff(finding, manifest)
-        pr_url = self.open_pr(
-            finding=finding,
-            manifest=manifest,
-            branch_name=branch_name,
-            verification_commands=verification_commands,
-        )
-        return {
-            "status": "routine",
-            "branch": branch_name,
-            "pr_url": pr_url,
-            "worker_report": worker_report,
-            "changed_files": list(stats.files),
-            "changed_lines": stats.changed_lines,
-            "finding": self._finding_payload(finding),
-        }
+        if duplicate_issue is not None and duplicate_finding is not None:
+            return {
+                "status": "skipped",
+                "reason": "duplicate-serious-escalation",
+                "issue": duplicate_issue,
+                "finding": self._finding_payload(duplicate_finding),
+            }
+        return {"status": "no-finding"}
 
     @staticmethod
     def _finding_payload(finding: Finding) -> dict[str, Any]:

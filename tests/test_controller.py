@@ -201,7 +201,7 @@ class ControllerTests(unittest.TestCase):
 
     def test_run_scheduled_allows_existing_open_pr_for_other_finding(self) -> None:
         class RepeatableController(StubController):
-            def discover(self, *, scope=None):
+            def discover(self, *, scope=None, excluded_serious_issues=()):
                 return make_finding()
 
             def find_open_routine_pr(self, *, title: str | None = None):
@@ -247,7 +247,7 @@ class ControllerTests(unittest.TestCase):
         finding = make_finding()
 
         class DuplicateController(StubController):
-            def discover(self, *, scope=None):
+            def discover(self, *, scope=None, excluded_serious_issues=()):
                 return finding
 
             def find_open_routine_pr(self, *, title: str | None = None):
@@ -283,8 +283,17 @@ class ControllerTests(unittest.TestCase):
         finding = make_finding(severity="serious")
 
         class DuplicateSeriousController(StubController):
-            def discover(self, *, scope=None):
+            def discover(self, *, scope=None, excluded_serious_issues=()):
                 return finding
+
+            def list_open_serious_issues(self):
+                return (
+                    {
+                        "number": 9,
+                        "title": self.serious_issue_title_for(finding),
+                        "url": "https://github.com/acme/repo/issues/9",
+                    },
+                )
 
             def find_open_serious_issue(self, *, title: str | None = None):
                 if title == self.serious_issue_title_for(finding):
@@ -314,6 +323,67 @@ class ControllerTests(unittest.TestCase):
                 "finding": controller._finding_payload(finding),
             },
         )
+
+    def test_run_scheduled_ignores_existing_serious_issue_and_escalates_new_finding(self) -> None:
+        duplicate = make_finding(severity="serious")
+        fresh = Finding.from_dict(
+            {
+                "severity": "serious",
+                "type": "osteoblast",
+                "category": "dead-code",
+                "scope": "src/other-service",
+                "proof": ["Unused branch remains wired into no runtime path."],
+                "candidate_files": ["src/other_service.py"],
+                "why": "This dead path misleads maintainers and adds maintenance cost.",
+                "estimated_change_size": {"files": 1, "lines": 18},
+                "confidence": 0.95,
+                "commit_title": "remove dead other-service branch",
+                "verification_hint": "python -m unittest",
+            }
+        )
+
+        class DuplicateAwareController(StubController):
+            seen_titles: tuple[str, ...] = ()
+
+            def discover(self, *, scope=None, excluded_serious_issues=()):
+                self.seen_titles = tuple(
+                    issue["title"]
+                    for issue in excluded_serious_issues
+                    if isinstance(issue, dict) and isinstance(issue.get("title"), str)
+                )
+                if self.serious_issue_title_for(duplicate) in self.seen_titles:
+                    return fresh
+                return duplicate
+
+            def list_open_serious_issues(self):
+                return (
+                    {
+                        "number": 9,
+                        "title": self.serious_issue_title_for(duplicate),
+                        "url": "https://github.com/acme/repo/issues/9",
+                    },
+                )
+
+            def find_open_serious_issue(self, *, title: str | None = None):
+                if title == self.serious_issue_title_for(duplicate):
+                    return self.list_open_serious_issues()[0]
+                return None
+
+            def escalate_serious_finding(self, finding: Finding, manifest: Manifest) -> dict[str, object]:
+                return {"issue_number": 11, "mode": "issue-only"}
+
+        controller = DuplicateAwareController(
+            manifest=make_manifest(),
+            repo_root=ROOT,
+            core_root=ROOT,
+            today=date(2026, 4, 10),
+        )
+        result = controller.run_scheduled()
+        self.assertIn(controller.serious_issue_title_for(duplicate), controller.seen_titles)
+        self.assertEqual(result["status"], "serious")
+        self.assertEqual(result["mode"], "issue-only")
+        self.assertEqual(result["issue_number"], 11)
+        self.assertEqual(result["finding"]["commit_title"], fresh.commit_title)
 
     def test_validate_routine_diff_rejects_forbidden_path(self) -> None:
         controller = StubController(
