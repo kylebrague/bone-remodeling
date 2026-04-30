@@ -98,6 +98,7 @@ class OsteoblastController:
         self.runner = runner or CommandRunner()
         self.today = today or date.today()
         self._prepared_plugin_homes: set[str] = set()
+        self._core_plugin_name: str | None = None
 
     def bootstrap(
         self,
@@ -230,6 +231,8 @@ class OsteoblastController:
         for relative, name in (
             (".github/agents/osteoblast.agent.md", "agent:osteoblast"),
             (".github/agents/osteoblast-worker.agent.md", "agent:osteoblast-worker"),
+            (".github/skills/osteoblast-finding-contract/SKILL.md", "skill:osteoblast-finding-contract"),
+            (".github/skills/osteoblast-severity-routing/SKILL.md", "skill:osteoblast-severity-routing"),
             (".github/skills/osteoblast-manifest-setup/SKILL.md", "skill:osteoblast-manifest-setup"),
             (".github/hooks/hooks.json", "hooks"),
         ):
@@ -617,6 +620,41 @@ class OsteoblastController:
 
         self._prepared_plugin_homes.add(copilot_home)
 
+    def _core_plugin_id(self) -> str:
+        if self._core_plugin_name is not None:
+            return self._core_plugin_name
+
+        plugin_manifest = self.core_root / "plugin.json"
+        try:
+            payload = json.loads(plugin_manifest.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise OsteoblastError(
+                f"Could not read Osteoblast plugin manifest at `{plugin_manifest}`."
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise OsteoblastError(
+                f"Osteoblast plugin manifest at `{plugin_manifest}` is not valid JSON."
+            ) from exc
+
+        plugin_name = payload.get("name")
+        if not isinstance(plugin_name, str) or not plugin_name.strip():
+            raise OsteoblastError(
+                f"Osteoblast plugin manifest at `{plugin_manifest}` must define a non-empty `name`."
+            )
+
+        self._core_plugin_name = plugin_name.strip()
+        return self._core_plugin_name
+
+    def _repo_agent_exists(self, agent: str) -> bool:
+        return (self.repo_root / ".github" / "agents" / f"{agent}.agent.md").exists()
+
+    def _resolve_copilot_agent(self, agent: str, env: Mapping[str, str]) -> str:
+        if self._repo_agent_exists(agent):
+            return agent
+
+        self._ensure_core_plugin_installed(env)
+        return f"{self._core_plugin_id()}:{agent}"
+
     def _run_copilot(
         self,
         *,
@@ -625,13 +663,13 @@ class OsteoblastController:
         extra_env: Mapping[str, str] | None = None,
     ):
         env = self._prepare_copilot_environment(extra_env)
-        self._ensure_core_plugin_installed(env)
+        resolved_agent = self._resolve_copilot_agent(agent, env)
         try:
             return self.runner.run(
                 [
                     "copilot",
                     "--agent",
-                    agent,
+                    resolved_agent,
                     "-p",
                     prompt,
                     "--allow-all-tools",
@@ -650,6 +688,8 @@ class OsteoblastController:
                     returncode=0,
                 )
             details: list[str] = [f"COPILOT_HOME: {env['COPILOT_HOME']}"]
+            if resolved_agent != agent:
+                details.append(f"resolved agent: {resolved_agent}")
             if exc.stderr.strip():
                 details.append("stderr:\n" + self._preview_output(exc.stderr))
             if exc.stdout.strip():

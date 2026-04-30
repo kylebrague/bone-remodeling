@@ -112,6 +112,24 @@ class ControllerTests(unittest.TestCase):
                     target_root
                     / ".github"
                     / "skills"
+                    / "osteoblast-finding-contract"
+                    / "SKILL.md"
+                ).exists()
+            )
+            self.assertTrue(
+                (
+                    target_root
+                    / ".github"
+                    / "skills"
+                    / "osteoblast-severity-routing"
+                    / "SKILL.md"
+                ).exists()
+            )
+            self.assertTrue(
+                (
+                    target_root
+                    / ".github"
+                    / "skills"
                     / "osteoblast-manifest-setup"
                     / "SKILL.md"
                 ).exists()
@@ -567,7 +585,7 @@ class ControllerTests(unittest.TestCase):
                 (
                     ("copilot", "--agent"),
                     CommandResult(
-                        args=("copilot", "--agent", "osteoblast"),
+                        args=("copilot", "--agent", "osteoblast:osteoblast"),
                         stdout='{"status":"no-finding"}',
                         stderr="",
                         returncode=0,
@@ -586,8 +604,43 @@ class ControllerTests(unittest.TestCase):
 
         self.assertEqual(result.stdout, '{"status":"no-finding"}')
         self.assertEqual(runner.calls[0], ("copilot", "plugin", "install", str(ROOT)))
-        self.assertEqual(runner.calls[1][:3], ("copilot", "--agent", "osteoblast"))
+        self.assertEqual(runner.calls[1][:3], ("copilot", "--agent", "osteoblast:osteoblast"))
         self.assertNotIn("--plugin-dir", runner.calls[1])
+
+    def test_run_copilot_prefers_repo_agent_overlay_over_core_plugin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            (repo_root / ".github" / "agents").mkdir(parents=True)
+            (repo_root / ".github" / "agents" / "osteoblast.agent.md").write_text(
+                "---\nname: osteoblast\n---\n",
+                encoding="utf-8",
+            )
+
+            runner = PrefixRunner(
+                [
+                    (
+                        ("copilot", "--agent"),
+                        CommandResult(
+                            args=("copilot", "--agent", "osteoblast"),
+                            stdout='{"status":"no-finding"}',
+                            stderr="",
+                            returncode=0,
+                        ),
+                    ),
+                ]
+            )
+            controller = OsteoblastController(
+                repo_root=repo_root,
+                core_root=ROOT,
+                runner=runner,
+                today=date(2026, 4, 10),
+            )
+
+            result = controller._run_copilot(agent="osteoblast", prompt="test prompt")
+
+        self.assertEqual(result.stdout, '{"status":"no-finding"}')
+        self.assertEqual(runner.calls[0][:3], ("copilot", "--agent", "osteoblast"))
+        self.assertNotIn(("copilot", "plugin", "install", str(ROOT)), runner.calls)
 
     def test_run_copilot_wraps_command_error_with_context(self) -> None:
         runner = PrefixRunner(
@@ -604,7 +657,7 @@ class ControllerTests(unittest.TestCase):
                 (
                     ("copilot", "--agent"),
                     CommandError(
-                        ["copilot", "--agent", "osteoblast"],
+                        ["copilot", "--agent", "osteoblast:osteoblast"],
                         1,
                         '{"status":"broken"}',
                         "stderr boom",
@@ -630,6 +683,7 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("stderr boom", message)
         self.assertIn('{"status":"broken"}', message)
         self.assertIn("COPILOT_HOME:", message)
+        self.assertIn("resolved agent: osteoblast:osteoblast", message)
 
     def test_run_copilot_wraps_plugin_install_error_with_context(self) -> None:
         runner = PrefixRunner(
@@ -685,7 +739,7 @@ class ControllerTests(unittest.TestCase):
                 (
                     ("copilot", "--agent"),
                     CommandError(
-                        ["copilot", "--agent", "osteoblast"],
+                        ["copilot", "--agent", "osteoblast:osteoblast"],
                         1,
                         '{"status":"no-finding"}',
                         stderr,
@@ -725,6 +779,8 @@ class ControllerTests(unittest.TestCase):
             (repo_root / ".git").mkdir()
             (repo_root / ".github" / "agents").mkdir(parents=True)
             (repo_root / ".github" / "hooks").mkdir(parents=True)
+            (repo_root / ".github" / "skills" / "osteoblast-finding-contract").mkdir(parents=True)
+            (repo_root / ".github" / "skills" / "osteoblast-severity-routing").mkdir(parents=True)
             (repo_root / ".github" / "skills" / "osteoblast-manifest-setup").mkdir(parents=True)
             (repo_root / ".github" / "workflows").mkdir(parents=True)
             (repo_root / "packages").mkdir()
@@ -761,6 +817,12 @@ class ControllerTests(unittest.TestCase):
             (repo_root / ".github" / "agents" / "osteoblast-worker.agent.md").write_text("---\nname: osteoblast-worker\n---\n", encoding="utf-8")
             (repo_root / ".github" / "hooks" / "hooks.json").write_text("{}", encoding="utf-8")
             (
+                repo_root / ".github" / "skills" / "osteoblast-finding-contract" / "SKILL.md"
+            ).write_text("---\nname: osteoblast-finding-contract\n---\n", encoding="utf-8")
+            (
+                repo_root / ".github" / "skills" / "osteoblast-severity-routing" / "SKILL.md"
+            ).write_text("---\nname: osteoblast-severity-routing\n---\n", encoding="utf-8")
+            (
                 repo_root / ".github" / "skills" / "osteoblast-manifest-setup" / "SKILL.md"
             ).write_text("---\nname: osteoblast-manifest-setup\n---\n", encoding="utf-8")
 
@@ -783,6 +845,8 @@ class ControllerTests(unittest.TestCase):
             (repo_root / ".git").mkdir()
             (repo_root / ".github" / "agents").mkdir(parents=True)
             (repo_root / ".github" / "hooks").mkdir(parents=True)
+            (repo_root / ".github" / "skills" / "osteoblast-finding-contract").mkdir(parents=True)
+            (repo_root / ".github" / "skills" / "osteoblast-severity-routing").mkdir(parents=True)
             (repo_root / ".github" / "skills" / "osteoblast-manifest-setup").mkdir(parents=True)
             (repo_root / ".github" / "workflows").mkdir(parents=True)
             (repo_root / "packages").mkdir()
@@ -819,6 +883,12 @@ class ControllerTests(unittest.TestCase):
             (repo_root / ".github" / "agents" / "osteoblast-worker.agent.md").write_text("---\nname: osteoblast-worker\n---\n", encoding="utf-8")
             (repo_root / ".github" / "hooks" / "hooks.json").write_text("{}", encoding="utf-8")
             (
+                repo_root / ".github" / "skills" / "osteoblast-finding-contract" / "SKILL.md"
+            ).write_text("---\nname: osteoblast-finding-contract\n---\n", encoding="utf-8")
+            (
+                repo_root / ".github" / "skills" / "osteoblast-severity-routing" / "SKILL.md"
+            ).write_text("---\nname: osteoblast-severity-routing\n---\n", encoding="utf-8")
+            (
                 repo_root / ".github" / "skills" / "osteoblast-manifest-setup" / "SKILL.md"
             ).write_text("---\nname: osteoblast-manifest-setup\n---\n", encoding="utf-8")
 
@@ -830,6 +900,9 @@ class ControllerTests(unittest.TestCase):
             result = controller.doctor()
             self.assertEqual(result["status"], "ok")
             checks = {check["name"]: check for check in result["checks"]}
+            self.assertEqual(checks["skill:osteoblast-finding-contract"]["status"], "ok")
+            self.assertEqual(checks["skill:osteoblast-severity-routing"]["status"], "ok")
+            self.assertEqual(checks["skill:osteoblast-manifest-setup"]["status"], "ok")
             self.assertEqual(checks["scope-selection"]["status"], "ok")
             self.assertEqual(checks["manifest:verify"]["status"], "ok")
 
@@ -839,6 +912,8 @@ class ControllerTests(unittest.TestCase):
             (repo_root / ".git").mkdir()
             (repo_root / ".github" / "agents").mkdir(parents=True)
             (repo_root / ".github" / "hooks").mkdir(parents=True)
+            (repo_root / ".github" / "skills" / "osteoblast-finding-contract").mkdir(parents=True)
+            (repo_root / ".github" / "skills" / "osteoblast-severity-routing").mkdir(parents=True)
             (repo_root / ".github" / "skills" / "osteoblast-manifest-setup").mkdir(parents=True)
             (repo_root / ".github" / "workflows").mkdir(parents=True)
             (repo_root / "packages").mkdir()
@@ -875,6 +950,12 @@ class ControllerTests(unittest.TestCase):
             (repo_root / ".github" / "agents" / "osteoblast.agent.md").write_text("---\nname: osteoblast\n---\n", encoding="utf-8")
             (repo_root / ".github" / "agents" / "osteoblast-worker.agent.md").write_text("---\nname: osteoblast-worker\n---\n", encoding="utf-8")
             (repo_root / ".github" / "hooks" / "hooks.json").write_text("{}", encoding="utf-8")
+            (
+                repo_root / ".github" / "skills" / "osteoblast-finding-contract" / "SKILL.md"
+            ).write_text("---\nname: osteoblast-finding-contract\n---\n", encoding="utf-8")
+            (
+                repo_root / ".github" / "skills" / "osteoblast-severity-routing" / "SKILL.md"
+            ).write_text("---\nname: osteoblast-severity-routing\n---\n", encoding="utf-8")
             (
                 repo_root / ".github" / "skills" / "osteoblast-manifest-setup" / "SKILL.md"
             ).write_text("---\nname: osteoblast-manifest-setup\n---\n", encoding="utf-8")
