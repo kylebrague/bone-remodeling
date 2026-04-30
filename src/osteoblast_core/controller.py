@@ -97,6 +97,7 @@ class OsteoblastController:
         self.core_root = core_root.resolve()
         self.runner = runner or CommandRunner()
         self.today = today or date.today()
+        self._prepared_plugin_homes: set[str] = set()
 
     def bootstrap(
         self,
@@ -581,6 +582,41 @@ class OsteoblastController:
             return stripped
         return stripped[:limit] + "\n...[truncated]"
 
+    def _ensure_core_plugin_installed(self, env: Mapping[str, str]) -> None:
+        copilot_home = env.get("COPILOT_HOME")
+        if not copilot_home:
+            raise OsteoblastError("COPILOT_HOME must be configured before installing the Osteoblast plugin.")
+        if copilot_home in self._prepared_plugin_homes:
+            return
+
+        plugin_manifest = self.core_root / "plugin.json"
+        if not plugin_manifest.exists():
+            raise OsteoblastError(
+                f"Core root `{self.core_root}` is missing `plugin.json`, so the Osteoblast Copilot plugin cannot be installed."
+            )
+
+        try:
+            self.runner.run(
+                ["copilot", "plugin", "install", str(self.core_root)],
+                cwd=self.repo_root,
+                env=env,
+            )
+        except CommandError as exc:
+            details: list[str] = [
+                f"COPILOT_HOME: {copilot_home}",
+                f"core_root: {self.core_root}",
+            ]
+            if exc.stderr.strip():
+                details.append("stderr:\n" + self._preview_output(exc.stderr))
+            if exc.stdout.strip():
+                details.append("stdout:\n" + self._preview_output(exc.stdout))
+            raise OsteoblastError(
+                "Failed to install the Osteoblast Copilot plugin from the core checkout.\n\n"
+                + "\n\n".join(details)
+            ) from exc
+
+        self._prepared_plugin_homes.add(copilot_home)
+
     def _run_copilot(
         self,
         *,
@@ -589,12 +625,11 @@ class OsteoblastController:
         extra_env: Mapping[str, str] | None = None,
     ):
         env = self._prepare_copilot_environment(extra_env)
+        self._ensure_core_plugin_installed(env)
         try:
             return self.runner.run(
                 [
                     "copilot",
-                    "--plugin-dir",
-                    str(self.core_root),
                     "--agent",
                     agent,
                     "-p",

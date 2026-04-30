@@ -514,7 +514,16 @@ class ControllerTests(unittest.TestCase):
         runner = PrefixRunner(
             [
                 (("git", "status", "--porcelain"), CommandResult(args=("git", "status", "--porcelain"), stdout="", stderr="", returncode=0)),
-                (("copilot",), run_copilot),
+                (
+                    ("copilot", "plugin", "install"),
+                    CommandResult(
+                        args=("copilot", "plugin", "install", str(ROOT)),
+                        stdout="",
+                        stderr="",
+                        returncode=0,
+                    ),
+                ),
+                (("copilot", "--agent"), run_copilot),
             ]
         )
         controller = StubController(
@@ -543,11 +552,57 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(env["COPILOT_HOME"], str(copilot_home.resolve()))
             self.assertTrue((copilot_home / "session-state").exists())
 
+    def test_run_copilot_installs_core_plugin_before_prompt(self) -> None:
+        runner = PrefixRunner(
+            [
+                (
+                    ("copilot", "plugin", "install"),
+                    CommandResult(
+                        args=("copilot", "plugin", "install", str(ROOT)),
+                        stdout="",
+                        stderr="",
+                        returncode=0,
+                    ),
+                ),
+                (
+                    ("copilot", "--agent"),
+                    CommandResult(
+                        args=("copilot", "--agent", "osteoblast"),
+                        stdout='{"status":"no-finding"}',
+                        stderr="",
+                        returncode=0,
+                    ),
+                ),
+            ]
+        )
+        controller = OsteoblastController(
+            repo_root=ROOT,
+            core_root=ROOT,
+            runner=runner,
+            today=date(2026, 4, 10),
+        )
+
+        result = controller._run_copilot(agent="osteoblast", prompt="test prompt")
+
+        self.assertEqual(result.stdout, '{"status":"no-finding"}')
+        self.assertEqual(runner.calls[0], ("copilot", "plugin", "install", str(ROOT)))
+        self.assertEqual(runner.calls[1][:3], ("copilot", "--agent", "osteoblast"))
+        self.assertNotIn("--plugin-dir", runner.calls[1])
+
     def test_run_copilot_wraps_command_error_with_context(self) -> None:
         runner = PrefixRunner(
             [
                 (
-                    ("copilot",),
+                    ("copilot", "plugin", "install"),
+                    CommandResult(
+                        args=("copilot", "plugin", "install", str(ROOT)),
+                        stdout="",
+                        stderr="",
+                        returncode=0,
+                    ),
+                ),
+                (
+                    ("copilot", "--agent"),
                     CommandError(
                         ["copilot", "--agent", "osteoblast"],
                         1,
@@ -576,6 +631,39 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('{"status":"broken"}', message)
         self.assertIn("COPILOT_HOME:", message)
 
+    def test_run_copilot_wraps_plugin_install_error_with_context(self) -> None:
+        runner = PrefixRunner(
+            [
+                (
+                    ("copilot", "plugin", "install"),
+                    CommandError(
+                        ["copilot", "plugin", "install", str(ROOT)],
+                        1,
+                        "",
+                        "install boom",
+                    ),
+                )
+            ]
+        )
+        controller = OsteoblastController(
+            repo_root=ROOT,
+            core_root=ROOT,
+            runner=runner,
+            today=date(2026, 4, 10),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaises(OsteoblastError) as context:
+                controller._run_copilot(
+                    agent="osteoblast",
+                    prompt="test prompt",
+                    extra_env={"COPILOT_HOME": str(Path(temp_dir) / "copilot-home")},
+                )
+        message = str(context.exception)
+        self.assertIn("Failed to install the Osteoblast Copilot plugin", message)
+        self.assertIn("install boom", message)
+        self.assertIn("COPILOT_HOME:", message)
+        self.assertIn("core_root:", message)
+
     def test_run_copilot_recovers_from_session_persistence_failure(self) -> None:
         stderr = "\n".join(
             [
@@ -586,7 +674,16 @@ class ControllerTests(unittest.TestCase):
         runner = PrefixRunner(
             [
                 (
-                    ("copilot",),
+                    ("copilot", "plugin", "install"),
+                    CommandResult(
+                        args=("copilot", "plugin", "install", str(ROOT)),
+                        stdout="",
+                        stderr="",
+                        returncode=0,
+                    ),
+                ),
+                (
+                    ("copilot", "--agent"),
                     CommandError(
                         ["copilot", "--agent", "osteoblast"],
                         1,
